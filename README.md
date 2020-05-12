@@ -1,2 +1,2 @@
 # ionvm
-ionvm is a aimple vmm
+ionvm is a simple vm
