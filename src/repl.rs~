@@ -1,0 +1,72 @@
+use std::num::ParseIntError;
+use std::io;
+use std::io::Write;
+use crate::vm::VM;
+struct Repl{
+    vm:VM,
+    cmd_buf:Vec<String>
+}
+impl Repl{
+    pub fn new() -> Self{
+	Repl{
+	    vm:VM::new(),
+	    cmd_buf:vec![]
+	}
+    }
+    fn parse_hex(&mut self, i: &str) -> Result<Vec<u16>, ParseIntError>{
+	let split:Vec<&str> = i.split(' ').collect();
+	let mut res:Vec<u16> = vec![];
+	for s in split{
+	    match u16::from_str_radix(&s, 16){
+		Ok(r) => res.push(r),
+		Err(e) => return Err(e),
+	    };
+	}
+	Ok(res)
+    }
+    pub fn run (&mut self){
+	println!("Ionvm 0.2.0");
+	loop{
+	    let mut buf=String::new();
+	    let stdin=io::stdin();
+	    print!(">>> ");
+	    io::stdout().flush().expect("Unable to flush stdout");
+	    stdin.read_line(&mut buf).expect("Unable to read stdin");
+	    let buf=buf.trim();
+	    match buf{
+		".quit" => {
+		    println!("See ya!");
+		    std::process::exit(0);
+		},
+		".history" => {
+		    for cmd in &self.cmd_buf{
+			println!("{}",cmd);
+		    }
+		},
+		".program"|".prog" => {
+		    for inst in &self.vm.program{
+			println!("{}",inst);
+		    }
+		},
+		".registers"|".regs" => {
+		    println!("normal registers:{:?}",self.vm.regs);
+		    println!("remainder_flag:{}",self.vm.rem);
+		    println!("program counter:{}",self.vm.pc);
+		},
+		_ => {
+		    let res=self.parse_hex(buf);
+		    match res{
+			Ok(bytes) => {
+			    for b in bytes{
+				self.vm.program.push(b);
+			    }
+			},
+			Err(e) => println!("Invalid input\n{}",e)
+		    };
+		    self.vm.run_once();
+		}
+	    }
+	    self.cmd_buf.push(buf.to_string());
+	}
+    }
+}

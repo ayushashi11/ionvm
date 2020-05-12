@@ -1,0 +1,84 @@
+pub mod vm;
+pub mod inst;
+pub mod repl;
+#[cfg(test)]
+mod tests {
+    use super::inst::*;
+    use super::vm::*;
+    #[test]
+    fn create_vm() {
+        let test_vm=VM::new();
+	assert_eq!(test_vm.regs[0],0);
+    }
+    #[test]
+    fn create_op_hlt(){
+	let opcode=OpCode::Hlt;
+	assert_eq!(opcode,OpCode::Hlt);
+    }
+    #[test]
+    fn create_inst(){
+	let inst=Inst::new(OpCode::Hlt);
+	assert_eq!(inst.opc,OpCode::Hlt);
+    }
+    #[test]
+    fn op_hlt(){
+	let mut test_vm=VM::from(vec![1,0,0,0]);
+	test_vm.run();
+	assert_eq!(test_vm.pc,1);
+    }
+    #[test]
+    fn op_igl(){
+	let mut test_vm=VM::from(vec![200,0,0,0]);
+	test_vm.run();
+	assert_eq!(test_vm.pc,1);
+    }
+    #[test]
+    fn op_load(){
+	let mut test_vm=VM::from(vec![2,0,0,500]);
+	test_vm.run();
+	assert_eq!(test_vm.regs[0],500);
+    }
+    #[test]
+    fn op_div(){
+	let mut test_vm=VM::from(vec![2,0,0,3,2,1,0,2,6,0,1,2]);
+	test_vm.run();
+	assert_eq!(test_vm.rem,1);
+	assert_eq!(test_vm.regs[2],1);
+    }
+    #[test]
+    fn op_jmp(){
+	let mut test_vm=VM::from(vec![8,0,0,0]);
+	test_vm.regs[0]=1;
+	test_vm.run_once();
+	assert_eq!(test_vm.pc,1);
+    }
+    #[test]
+    fn op_jmpf(){
+	let mut test_vm=VM::from(vec![10,0,0,0,1]);
+	test_vm.regs[0]=2;
+	test_vm.run_once();
+	assert_eq!(test_vm.pc,4);
+    }
+    #[test]
+    fn op_eq(){
+	let mut test_vm=VM::from(vec![11,0,1,2]);
+	test_vm.regs[0]=2;
+	test_vm.regs[1]=2;
+	test_vm.run();
+	assert_eq!(test_vm.regs[2],1);
+	test_vm.pc=0;
+	test_vm.regs[1]=1;
+	test_vm.run();
+	assert_eq!(test_vm.regs[2],0);
+    }
+    #[test]
+    fn op_jeq(){
+	let mut test_vm=VM::from(vec![11,0,1,2,17,2,3]);
+	test_vm.regs[0]=1;
+	test_vm.regs[1]=1;
+	test_vm.regs[3]=0;
+	test_vm.run_once();
+	test_vm.run_once();
+	assert_eq!(test_vm.pc,0);
+    }
+}
