@@ -3,6 +3,7 @@ use std::env::args;
 use std::fs::File;
 use ionvm::repl::Repl;
 use ionvm::vm::VM;
+use ionvm::env::IonEnv;
 fn main(){
     match args().nth(1){
 	Some(fil) => {
@@ -15,6 +16,7 @@ fn main(){
 	    println!("{:?}\nremainder_flag:{}\nprogram counter:{}",vm.regs,vm.rem,vm.pc);
 	},
 	None => {
+	    unsafe{IonEnv.is_shell = true;}
 	    let mut repl=Repl::new();
 	    repl.run();
 	}

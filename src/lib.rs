@@ -1,10 +1,16 @@
 pub mod vm;
 pub mod inst;
 pub mod repl;
+pub mod env;
 #[cfg(test)]
 mod tests {
     use super::inst::*;
     use super::vm::*;
+    use super::env::IonEnv;
+    #[test]
+    fn env_ (){
+	unsafe{assert!(!IonEnv.is_shell);}
+    }
     #[test]
     fn create_vm() {
         let test_vm=VM::new();

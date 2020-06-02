@@ -1,9 +1,7 @@
 use std::num::ParseIntError;
-use std::io;
-use std::io::Write;
 use ionvm::vm::VM;
+use ionvm::env::IonEnv;
 use std::env;
-use rustyline::error::ReadlineError;
 use rustyline::Editor;
 pub struct Repl{
     vm:VM,
@@ -38,6 +36,7 @@ impl Repl{
     }
     pub fn run (&mut self){
 	println!("Ionvm 0.2.0");
+	unsafe{IonEnv.is_shell = true;}
 	loop{
 	    let buf=self.rl.readline(prompt).unwrap_or(String::from(".quit"));
 	    match buf.as_str(){
