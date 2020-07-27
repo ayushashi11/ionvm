@@ -56,7 +56,14 @@ impl VM{
 	match self.decode_opcode(){
 	    OpCode::Load => {
 		let reg=self.next_16_bits() as usize;
-		self.regs[reg]=self.next_32_bits() as i32;
+		let v=self.next_32_bits() as i32;
+		match reg{
+		    0..31=>{
+			self.regs[reg]=v;
+		    },
+		    _=>{
+			//TODO: HEAP
+		    }
 		false
 	    },
 	    OpCode::Hlt => {
