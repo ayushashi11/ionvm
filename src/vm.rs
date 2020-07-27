@@ -57,13 +57,11 @@ impl VM{
 	    OpCode::Load => {
 		let reg=self.next_16_bits() as usize;
 		let v=self.next_32_bits() as i32;
-		match reg{
-		    0..31=>{
+		if 0<=reg && reg<32{
 			self.regs[reg]=v;
-		    },
-		    _=>{
-			//TODO: HEAP
-		    }
+		}
+		else{
+			panic!("heap not build yet");
 		}
 		false
 	    },
