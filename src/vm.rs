@@ -64,6 +64,7 @@ impl VM{
 		    _=>{
 			//TODO: HEAP
 		    }
+		}
 		false
 	    },
 	    OpCode::Hlt => {
