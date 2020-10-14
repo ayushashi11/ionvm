@@ -8,6 +8,6 @@ edition = "2018"
 
 [dependencies]
 clap="3.0.0-beta.2"
-rustyline="6.2.0"
+rustyline="6.3.0"
 rustyline-derive = "0.3.1"
 env_logger = "0.7.1"
