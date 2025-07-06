@@ -1,0 +1,12 @@
+[package]
+name = "vm-ffi"
+version = "0.1.0"
+edition = "2024"
+description = "Foreign Function Interface for the VM - allows calling Rust and Python functions"
+
+[dependencies]
+# pyo3 = { workspace = true, optional = true }  # TODO: Enable for Python FFI later
+
+[features]
+default = []
+# python = ["pyo3"]  # TODO: Enable for Python FFI later

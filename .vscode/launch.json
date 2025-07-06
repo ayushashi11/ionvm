@@ -1,0 +1,87 @@
+{
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug ionvm run",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=ionvm",
+          "--package=vmm"
+        ],
+        "filter": {
+          "name": "ionvm",
+          "kind": "bin"
+        }
+      },
+      "args": ["run", "${input:ionpackFile}"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug iondis",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=iondis",
+          "--package=vmm"
+        ],
+        "filter": {
+          "name": "iondis",
+          "kind": "bin"
+        }
+      },
+      "args": ["${input:ionpackFile}"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug create_sample",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=create_sample",
+          "--package=vmm"
+        ],
+        "filter": {
+          "name": "create_sample",
+          "kind": "bin"
+        }
+      },
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug create_ionc",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=create_ionc",
+          "--package=vmm"
+        ],
+        "filter": {
+          "name": "create_ionc",
+          "kind": "bin"
+        }
+      },
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "type": "pickString",
+      "id": "ionpackFile",
+      "description": "Select an ionpack file to debug with",
+      "options": [
+        "actors.ionpack",
+        "complex.ionpack", 
+        "hello.ionpack",
+        "unified-actors.ionpack"
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
-[package]
-name = "vmm"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["vmm", "vm-ffi"]
+resolver = "2"
 
-[dependencies]
+[workspace.dependencies]
+pyo3 = "0.20"

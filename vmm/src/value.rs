@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 pub type Atom = String; // Atoms are interned strings in some languages; here, just String for now
 
@@ -78,7 +78,7 @@ impl Object {
             Some(desc.value.clone())
         } else if let Some(proto) = &self.prototype {
             proto.borrow().get_property(key)
-        } else if let Some(magic) = self.magic_methods.get("__getattr__") {
+        } else if let Some(_magic) = self.magic_methods.get("__getattr__") {
             // Call __getattr__ with key as argument (not implemented here)
             // Placeholder: just return None for now
             None
@@ -90,7 +90,7 @@ impl Object {
     /// Set a property, creating or updating as needed.
     /// If __setattr__ magic method exists, call it instead.
     pub fn set_property(&mut self, key: &str, value: Value) {
-        if let Some(magic) = self.magic_methods.get("__setattr__") {
+        if let Some(_magic) = self.magic_methods.get("__setattr__") {
             // Call __setattr__ with key and value as arguments (not implemented here)
             // Placeholder: do nothing for now
         } else {
@@ -116,12 +116,50 @@ pub struct TaggedEnum {
     pub value: Value,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum FunctionType {
+    Bytecode {
+        bytecode: Vec<crate::vm::Instruction>,
+    },
+    Ffi {
+        function_name: String,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct Function {
     pub name: Option<String>,
-    pub bytecode: Vec<crate::vm::Instruction>,
     pub arity: usize,
+    pub extra_regs: usize, // Additional registers beyond arity for calculations
+    pub function_type: FunctionType,
     // More metadata as needed
+}
+
+impl Function {
+    /// Create a new bytecode function
+    pub fn new_bytecode(name: Option<String>, arity: usize, extra_regs: usize, bytecode: Vec<crate::vm::Instruction>) -> Self {
+        Function {
+            name,
+            arity,
+            extra_regs,
+            function_type: FunctionType::Bytecode { bytecode },
+        }
+    }
+    
+    /// Create a new FFI function
+    pub fn new_ffi(name: Option<String>, arity: usize, function_name: String) -> Self {
+        Function {
+            name,
+            arity,
+            extra_regs: 0, // FFI functions don't need extra registers 
+            function_type: FunctionType::Ffi { function_name },
+        }
+    }
+    
+    /// Get total number of registers needed (arity + extra_regs)
+    pub fn total_registers(&self) -> usize {
+        self.arity + self.extra_regs
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -153,14 +191,16 @@ pub enum ProcessStatus {
 impl Process {
     pub fn new(pid: usize, function: Rc<Function>, args: Vec<Value>) -> Self {
         let mut registers = args;
-        registers.resize(16, Value::Primitive(Primitive::Undefined));
+        // Ensure we have enough registers for the function's needs
+        let total_regs = function.total_registers().max(16); // Minimum 16 registers for compatibility
+        registers.resize(total_regs, Value::Primitive(Primitive::Undefined));
         let frame = crate::vm::Frame {
             registers,
             stack: Vec::new(),
             ip: 0,
             function,
             return_value: None,
-            curr_ret_reg: None,
+            caller_return_reg: None,
         };
         Process {
             pid,
@@ -275,11 +315,12 @@ mod tests {
     fn test_function_call_frame_setup() {
         use crate::vm::{Frame, Instruction};
         // Create a function that just returns its first argument
-        let func = Rc::new(Function {
-            name: Some("id".to_string()),
-            bytecode: vec![Instruction::Return(0)],
-            arity: 1,
-        });
+        let func = Rc::new(Function::new_bytecode(
+            Some("id".to_string()),
+            1,
+            0, // No extra registers needed for simple return
+            vec![Instruction::Return(0)]
+        ));
         let mut registers = vec![Value::Primitive(Primitive::Number(42.0))];
         registers.resize(16, Value::Primitive(Primitive::Undefined));
         let frame = Frame {
@@ -288,12 +329,100 @@ mod tests {
             ip: 0,
             function: func.clone(),
             return_value: None,
-            curr_ret_reg: None,
+            caller_return_reg: None,
         };
         // Simulate a call by pushing a new frame
-        let mut frames = vec![frame];
+        let frames = vec![frame];
         // The return value should be in register 0 after return
         let ret_val = frames.last().unwrap().registers[0].clone();
         assert_eq!(ret_val, Value::Primitive(Primitive::Number(42.0)));
+    }
+}
+
+#[cfg(test)]
+mod extra_regs_tests {
+    use super::*;
+    use crate::vm::{IonVM, Instruction, ExecutionResult};
+    
+    #[test]
+    fn test_vm_with_extra_regs_function() {
+        let mut vm = IonVM::new();
+        
+        // Create a function that uses extra registers for complex calculations
+        // Function takes 2 arguments and uses 4 extra registers
+        let complex_func = Function::new_bytecode(
+            Some("complex_math".to_string()),
+            2, // Arguments: r0, r1
+            4, // Extra registers: r2, r3, r4, r5
+            vec![
+                // Complex calculation: ((a + b) * 2) + ((a - b) * 3)
+                Instruction::Add(2, 0, 1),           // r2 = a + b
+                Instruction::Sub(3, 0, 1),           // r3 = a - b
+                Instruction::LoadConst(4, Value::Primitive(Primitive::Number(2.0))), // r4 = 2
+                Instruction::LoadConst(5, Value::Primitive(Primitive::Number(3.0))), // r5 = 3
+                Instruction::Mul(2, 2, 4),           // r2 = (a + b) * 2
+                Instruction::Mul(3, 3, 5),           // r3 = (a - b) * 3
+                Instruction::Add(0, 2, 3),           // r0 = result (reuse r0 for return)
+                Instruction::Return(0),
+            ]
+        );
+        
+        // Test that function reports correct register requirements
+        assert_eq!(complex_func.total_registers(), 6); // 2 args + 4 extra = 6 total
+        
+        // Spawn process with the function
+        let args = vec![
+            Value::Primitive(Primitive::Number(10.0)), // a = 10
+            Value::Primitive(Primitive::Number(3.0)),  // b = 3
+        ];
+        
+        let pid = vm.spawn_process(Rc::new(complex_func), args);
+        
+        // Run the VM until completion
+        vm.run();
+        
+        // Verify the process allocated the correct number of registers
+        if let Some(process_rc) = vm.processes.get(&pid) {
+            let process = process_rc.borrow();
+            if let Some(frame) = process.frames.first() {
+                // Frame should have at least 6 registers (may have more for compatibility)
+                assert!(frame.registers.len() >= 6);
+                
+                // Check that the computation was done correctly
+                // Expected: ((10 + 3) * 2) + ((10 - 3) * 3) = (13 * 2) + (7 * 3) = 26 + 21 = 47
+                if let Some(result) = &process.last_result {
+                    assert_eq!(*result, Value::Primitive(Primitive::Number(47.0)));
+                }
+            }
+        }
+    }
+
+    #[test] 
+    fn test_minimal_register_allocation() {
+        let mut vm = IonVM::new();
+        
+        // Function with no arguments and no extra registers - should still get minimum 16 for compatibility
+        let minimal_func = Function::new_bytecode(
+            Some("minimal".to_string()),
+            0, // No arguments
+            0, // No extra registers
+            vec![
+                Instruction::LoadConst(0, Value::Primitive(Primitive::Number(42.0))),
+                Instruction::Return(0),
+            ]
+        );
+        
+        assert_eq!(minimal_func.total_registers(), 0);
+        
+        let pid = vm.spawn_process(Rc::new(minimal_func), vec![]);
+        
+        // Verify minimum register allocation
+        if let Some(process_rc) = vm.processes.get(&pid) {
+            let process = process_rc.borrow();
+            if let Some(frame) = process.frames.first() {
+                // Should have at least 16 registers for compatibility
+                assert!(frame.registers.len() >= 16);
+            }
+        }
     }
 }

@@ -1,0 +1,24 @@
+[package]
+name = "vmm"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "ionvm"
+path = "src/bin/ionvm.rs"
+
+[[bin]]
+name = "iondis"
+path = "src/bin/iondis.rs"
+
+[[bin]]
+name = "create_sample"
+path = "src/bin/create_sample.rs"
+
+[[bin]]
+name = "create_ionc"
+path = "src/bin/create_ionc.rs"
+
+[dependencies]
+vm-ffi = { path = "../vm-ffi" }
+zip = "0.6"
