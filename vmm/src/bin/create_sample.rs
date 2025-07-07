@@ -141,6 +141,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
     // Build the IonPack using multi-function format
     let mut builder = IonPackBuilder::new("unified-actors".to_string(), "1.0.0".to_string())
         .main_class("UnifiedActors".to_string())
+        .entry_point("coordinator".to_string())
         .description("Complete actor model demonstration - both functions in single file".to_string())
         .author("IonVM Developer".to_string());
 
@@ -231,6 +232,7 @@ fn create_hello_sample() -> Result<(), Box<dyn std::error::Error>> {
     // Build the IonPack
     let mut builder = IonPackBuilder::new("hello-world".to_string(), "1.0.0".to_string())
         .main_class("Main".to_string())
+        .entry_point("main".to_string())
         .description("Simple hello world example".to_string())
         .author("IonVM Developer".to_string());
 
@@ -292,6 +294,8 @@ fn create_complex_sample() -> Result<(), Box<dyn std::error::Error>> {
         1, // Need r0 for object return value
         vec![
             Instruction::LoadConst(0, object_value),
+            Instruction::LoadConst(1, Value::Primitive(Primitive::Atom("__stdlib:PrintLn".to_string()))),
+            Instruction::Call(1, 1, vec![0]), // Call println with "name"
             Instruction::Return(0),
         ]
     );
@@ -316,6 +320,7 @@ fn create_complex_sample() -> Result<(), Box<dyn std::error::Error>> {
     // Build the IonPack
     let mut builder = IonPackBuilder::new("complex-example".to_string(), "1.0.0".to_string())
         .main_class("Main".to_string())
+        .entry_point("main".to_string())
         .description("Complex example with object manipulation".to_string())
         .author("IonVM Developer".to_string());
 
@@ -426,12 +431,13 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             Instruction::Call(2, 0, vec![1]),
             
             // Step 1: Load worker function reference using special marker for resolution
-            Instruction::LoadConst(3, Value::Primitive(Primitive::Atom("__function_ref:Worker".to_string()))),
+            Instruction::LoadConst(3, Value::Primitive(Primitive::Atom("__function_ref:worker".to_string()))),
             
             // Debug: Print worker function loaded
             Instruction::LoadConst(4, Value::Primitive(Primitive::Atom("__stdlib:debug".to_string()))),
             Instruction::LoadConst(5, Value::Primitive(Primitive::Atom("MAIN: Worker function reference loaded".to_string()))),
             Instruction::Call(6, 4, vec![5]),
+            Instruction::Call(6, 4, vec![3]), // Debug print the worker function reference
             
             // Step 2: Get self process reference (coordinator)
             Instruction::LoadConst(7, Value::Primitive(Primitive::Atom("__vm:self".to_string()))),
@@ -475,7 +481,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             
             // Debug: Print final result value
             Instruction::LoadConst(26, Value::Primitive(Primitive::Atom("__stdlib:debug".to_string()))),
-            Instruction::Call(27, 26, vec![22]), // Debug print the actual result value
+            Instruction::Call(26, 26, vec![22]), // Debug print the actual result value
             
             // Step 7: Return the received result
             Instruction::Return(22),  // return received result
@@ -572,6 +578,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
     // Build the IonPack
     let mut builder = IonPackBuilder::new("actors-example".to_string(), "1.0.0".to_string())
         .main_class("Main".to_string())
+        .entry_point("main".to_string())
         .description("Actor model with cross-process communication".to_string())
         .author("IonVM Developer".to_string());
 

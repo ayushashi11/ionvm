@@ -145,12 +145,7 @@ impl IonVM {
 
     /// Get a stdlib function as a VM Value
     pub fn get_stdlib_function(&self, name: &str) -> Option<Value> {
-        if let Some(_ffi_func) = self.ffi_registry.get_function_info(name) {
-            // Create a special FFI function value
-            Some(Value::Primitive(crate::value::Primitive::Atom(format!("__stdlib:{}", name))))
-        } else {
-            None
-        }
+        self.get_ffi_function(name)
     }
 
     /// Resolve special __vm: values at runtime
@@ -189,6 +184,13 @@ impl IonVM {
                     // Handle function references - these would normally be resolved at load time
                     // For now, return undefined as they need to be handled by the IonPack loader
                     Value::Primitive(crate::value::Primitive::Undefined)
+                } else if atom.starts_with("__stdlib:") {
+                    // Handle stdlib function references
+                    if let Some(func) = self.get_stdlib_function(&atom[9..]) {
+                        func
+                    } else {
+                        Value::Primitive(crate::value::Primitive::Undefined)
+                    }
                 } else if atom == "self" {
                     // Legacy support for bare 'self' - treat as __vm:self
                     if let Some(current_proc) = self.processes.get(&current_pid) {
@@ -775,6 +777,7 @@ impl IonVM {
                     }
                     _ => {
                         // Not a function - can't spawn
+                        eprintln!("[VM DEBUG] SPAWN: Attempted to spawn non-function value: {:?}", func_value);
                         if let Some(frame) = proc.frames.last_mut() {
                             frame.registers[dst_reg] = Value::Primitive(crate::value::Primitive::Undefined);
                         }

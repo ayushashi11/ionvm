@@ -83,6 +83,7 @@ pub struct Manifest {
     pub name: String,
     pub version: String,
     pub main_class: Option<String>,
+    pub entry_point: Option<String>,
     pub description: Option<String>,
     pub author: Option<String>,
     pub dependencies: Vec<String>,
@@ -97,6 +98,7 @@ impl Manifest {
             name,
             version,
             main_class: None,
+            entry_point: None,
             description: None,
             author: None,
             dependencies: Vec::new(),
@@ -115,6 +117,10 @@ impl Manifest {
         
         if let Some(ref main) = self.main_class {
             result.push_str(&format!("Main-Class: {}\n", main));
+        }
+        
+        if let Some(ref entry) = self.entry_point {
+            result.push_str(&format!("Entry-Point: {}\n", entry));
         }
         
         if let Some(ref desc) = self.description {
@@ -159,6 +165,7 @@ impl Manifest {
                     "Name" => manifest.name = value.to_string(),
                     "Version" => manifest.version = value.to_string(),
                     "Main-Class" => manifest.main_class = Some(value.to_string()),
+                    "Entry-Point" => manifest.entry_point = Some(value.to_string()),
                     "Description" => manifest.description = Some(value.to_string()),
                     "Author" => manifest.author = Some(value.to_string()),
                     "Dependencies" => {
@@ -214,6 +221,11 @@ impl IonPackBuilder {
 
     pub fn main_class(mut self, main_class: String) -> Self {
         self.manifest.main_class = Some(main_class);
+        self
+    }
+
+    pub fn entry_point(mut self, entry_point: String) -> Self {
+        self.manifest.entry_point = Some(entry_point);
         self
     }
 
@@ -490,7 +502,7 @@ impl<R: Read + Seek> IonPackReader<R> {
         // Second pass: resolve function references with class-aware resolution
         let mut resolved_functions = HashMap::new();
         for (class_name, class_functions) in &class_functions_map {
-            for mut function in class_functions.clone() {
+            for function in class_functions.clone() {
                 // Create a class-local function registry for intra-class references
                 let mut class_local_registry = HashMap::new();
                 for f in class_functions {
@@ -503,15 +515,23 @@ impl<R: Read + Seek> IonPackReader<R> {
                     class_local_registry.insert(name.clone(), f.clone());
                 }
                 
-                resolve_function_references(&mut function, &class_local_registry);
-                
                 if let Some(ref function_name) = function.name {
-                    resolved_functions.insert(function_name.clone(), function.clone());
+                    //resolved_functions.insert(function_name.clone(), function.clone());
                     resolved_functions.insert(format!("{}:{}", class_name, function_name), function);
                 } else {
                     resolved_functions.insert(class_name.clone(), function);
                 }
             }
+        }
+        
+        let resolv_clone = resolved_functions.clone();
+        for name in resolv_clone.keys() {
+            println!("found: {}", name);
+        }
+        for (name, function) in &mut resolved_functions {
+            // Resolve any references within the function
+            println!("Resolving function references for: {}", name);
+            resolve_function_references(function, &resolv_clone);
         }
         
         Ok(resolved_functions)
@@ -520,35 +540,34 @@ impl<R: Read + Seek> IonPackReader<R> {
     /// Get the main function for CLI execution
     /// 
     /// CLI execution follows this resolution order:
-    /// 1. If Main-Class is specified in manifest, load that class
-    /// 2. For multi-function classes, find the first function with arity 0
-    /// 3. For single-function classes, use that function
-    /// 4. If no Main-Class is specified, return an error
-    /// 5. Resolve function references within the class
+    /// 1. If Entry-Point is specified in manifest, use that exact function
+    /// 2. If Main-Class is specified in manifest, load that class and find main function
+    /// 3. For multi-function classes, find the first function with arity 0
+    /// 4. For single-function classes, use that function
+    /// 5. If no Main-Class is specified, return an error
+    /// 6. Resolve function references within the class
     pub fn get_main_function(&mut self) -> Result<Function, IonPackError> {
-        let main_class = self.manifest.main_class.clone()
-            .ok_or(IonPackError::MainClassNotSpecified)?;
-        
-        let class_functions = self.load_functions(&main_class)
-            .map_err(|e| {
-                eprintln!("Debug: Failed to load functions from class '{}': {}", main_class, e);
-                IonPackError::MainFunctionNotFound
-            })?;
-        
-        // Create a class-local function registry for intra-class references
-        let mut class_local_registry = HashMap::new();
-        for f in &class_functions {
-            if let Some(ref fname) = f.name {
-                class_local_registry.insert(fname.clone(), f.clone());
+        if let Ok(fns) = self.load_all_functions() {    
+            // Fall back to Main-Class behavior
+            let main_class = self.manifest.main_class.clone()
+                .ok_or(IonPackError::MainClassNotSpecified)?;
+
+            // First check if Entry-Point is specified
+            if let Some(ref entry_point) = self.manifest.entry_point {
+                if let Some(function) = fns.get(format!("{}:{}", main_class, entry_point).as_str()) {
+                    return Ok(function.clone());
+                } else {
+                    return Err(IonPackError::FunctionNotFound(entry_point.clone()));
+                }
             }
-        }
-        
-        // For multi-function classes, find the first function with arity 0 (main function)
-        for mut function in class_functions {
-            if function.arity == 0 {
-                // Resolve function references within this function
-                resolve_function_references(&mut function, &class_local_registry);
-                return Ok(function);
+            
+            if let Some(function) = fns.get(format!("{}:main", main_class).as_str()) {
+                // If it's a multi-function class, find the first function with arity 0
+                if function.arity == 0 {
+                    return Ok(function.clone());
+                } 
+            } else {
+                return Err(IonPackError::ClassNotFound(main_class));
             }
         }
         

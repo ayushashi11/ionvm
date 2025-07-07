@@ -1,12 +1,15 @@
 //! IonVM CLI - Command line interface for executing IonPack files
 
+use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::process;
 
+use vm_ffi::stdlib;
 use vmm::ionpack::{IonPackReader, IonPackError};
 use vmm::vm::IonVM;
 use vmm::value::{Value, Primitive, FunctionType};
+//get all stdlib functions
 
 /// CLI error types
 #[derive(Debug)]
@@ -125,7 +128,6 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     }
 
     // Get main function directly from the main class
-    let functions = reader.load_all_functions()?;
     let main_function = reader.get_main_function()
         .map_err(|e| CliError::ExecutionError(format!("Failed to load main function: {}", e)))?;
     
@@ -174,6 +176,10 @@ fn cmd_info(args: &[String]) -> Result<(), CliError> {
         println!("Main Class: {}", main_class);
     }
     
+    if let Some(ref entry_point) = manifest.entry_point {
+        println!("Entry Point: {}", entry_point);
+    }
+
     if let Some(ref description) = manifest.description {
         println!("Description: {}", description);
     }

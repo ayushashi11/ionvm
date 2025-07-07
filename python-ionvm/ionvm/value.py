@@ -1,0 +1,124 @@
+"""
+IonVM Value types and creation utilities.
+"""
+from typing import Dict, List, Any, Optional
+
+
+class Value:
+    """
+    Represents an IonVM value that can be serialized to bytecode.
+    """
+    
+    def __init__(self, value_type: str, data: Any):
+        self.value_type = value_type
+        self.data = data
+    
+    @classmethod
+    def number(cls, n: float) -> 'Value':
+        """Create a number value."""
+        return cls("number", float(n))
+    
+    @classmethod
+    def boolean(cls, b: bool) -> 'Value':
+        """Create a boolean value."""
+        return cls("boolean", bool(b))
+    
+    @classmethod
+    def atom(cls, s: str) -> 'Value':
+        """Create an atom (string) value."""
+        return cls("atom", str(s))
+    
+    @classmethod
+    def unit(cls) -> 'Value':
+        """Create a unit value."""
+        return cls("unit", None)
+    
+    @classmethod
+    def undefined(cls) -> 'Value':
+        """Create an undefined value."""
+        return cls("undefined", None)
+    
+    @classmethod
+    def array(cls, items: List['Value']) -> 'Value':
+        """Create an array value."""
+        return cls("array", list(items))
+    
+    @classmethod
+    def object(cls, properties: Dict[str, 'Value'], 
+               writable: Optional[Dict[str, bool]] = None,
+               enumerable: Optional[Dict[str, bool]] = None,
+               configurable: Optional[Dict[str, bool]] = None) -> 'Value':
+        """Create an object value with property descriptors."""
+        if writable is None:
+            writable = {k: True for k in properties}
+        if enumerable is None:
+            enumerable = {k: True for k in properties}
+        if configurable is None:
+            configurable = {k: True for k in properties}
+            
+        obj_data = {
+            "properties": properties,
+            "writable": writable,
+            "enumerable": enumerable,
+            "configurable": configurable
+        }
+        return cls("object", obj_data)
+    
+    @classmethod
+    def function_ref(cls, name: str) -> 'Value':
+        """Create a function reference value."""
+        return cls("function", name)
+    
+    @classmethod
+    def tuple(cls, items: List['Value']) -> 'Value':
+        """Create a tuple value."""
+        return cls("tuple", list(items))
+    
+    def serialize(self, writer) -> None:
+        """Serialize this value to binary format."""
+        if self.value_type == "number":
+            writer.write_u8(0x01)  # Number tag
+            writer.write_f64(self.data)
+        elif self.value_type == "boolean":
+            writer.write_u8(0x02)  # Boolean tag
+            writer.write_u8(1 if self.data else 0)
+        elif self.value_type == "atom":
+            writer.write_u8(0x03)  # Atom tag
+            writer.write_string(self.data)
+        elif self.value_type == "unit":
+            writer.write_u8(0x04)  # Unit tag
+        elif self.value_type == "undefined":
+            writer.write_u8(0x05)  # Undefined tag
+        elif self.value_type == "array":
+            writer.write_u8(0x06)  # Array tag
+            writer.write_u32(len(self.data))
+            for item in self.data:
+                item.serialize(writer)
+        elif self.value_type == "object":
+            writer.write_u8(0x07)  # Object tag
+            props = self.data["properties"]
+            writer.write_u32(len(props))
+            for key, value in props.items():
+                writer.write_string(key)
+                value.serialize(writer)
+                writer.write_u8(1 if self.data["writable"].get(key, True) else 0)
+                writer.write_u8(1 if self.data["enumerable"].get(key, True) else 0)
+                writer.write_u8(1 if self.data["configurable"].get(key, True) else 0)
+        elif self.value_type == "function":
+            writer.write_u8(0x08)  # Function tag
+            writer.write_string(self.data)
+        elif self.value_type == "tuple":
+            writer.write_u8(0x09)  # Tuple tag
+            writer.write_u32(len(self.data))
+            for item in self.data:
+                item.serialize(writer)
+        else:
+            raise ValueError(f"Unsupported value type: {self.value_type}")
+    
+    def __repr__(self) -> str:
+        return f"Value({self.value_type}, {self.data})"
+    
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, Value):
+            return False
+        return self.value_type == other.value_type and self.data == other.data
