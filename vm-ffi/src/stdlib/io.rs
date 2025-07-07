@@ -71,6 +71,7 @@ io_function!(Print, 1, "Print a value to stdout without newline", |args| {
 
 io_function!(PrintLn, 1, "Print a value to stdout with newline", |args| {
     let output = format_value(&args[0]);
+    println!("{:?}", &args[0]);
     println!("{}", output);
     Ok(FfiValue::Unit)
 });

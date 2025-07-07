@@ -67,7 +67,7 @@ class Value:
     @classmethod
     def function_ref(cls, name: str) -> 'Value':
         """Create a function reference value."""
-        return cls("function", name)
+        return cls("atom", f"__function_ref:{name}")
     
     @classmethod
     def tuple(cls, items: List['Value']) -> 'Value':

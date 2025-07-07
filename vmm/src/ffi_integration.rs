@@ -12,6 +12,7 @@ impl ToFfiValue for Value {
         match self {
             Value::Primitive(Primitive::Number(n)) => FfiValue::Number(*n),
             Value::Primitive(Primitive::Boolean(b)) => FfiValue::Boolean(*b),
+            Value::Primitive(Primitive::String(s)) => FfiValue::String(s.clone()),
             Value::Primitive(Primitive::Atom(s)) => FfiValue::String(s.clone()),
             Value::Primitive(Primitive::Unit) => FfiValue::Unit,
             Value::Primitive(Primitive::Undefined) => FfiValue::Undefined,

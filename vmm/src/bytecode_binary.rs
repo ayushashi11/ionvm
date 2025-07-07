@@ -67,6 +67,17 @@ enum Opcode {
     Match = 0x12,
     Yield = 0x13,
     Nop = 0x14,
+    // Comparison operations  
+    Equal = 0x15,
+    NotEqual = 0x16,
+    LessThan = 0x17,
+    LessEqual = 0x18,
+    GreaterThan = 0x19,
+    GreaterEqual = 0x1A,
+    // Logical operations
+    And = 0x1B,
+    Or = 0x1C,
+    Not = 0x1D,
 }
 
 impl TryFrom<u8> for Opcode {
@@ -94,6 +105,15 @@ impl TryFrom<u8> for Opcode {
             0x12 => Ok(Opcode::Match),
             0x13 => Ok(Opcode::Yield),
             0x14 => Ok(Opcode::Nop),
+            0x15 => Ok(Opcode::Equal),
+            0x16 => Ok(Opcode::NotEqual),
+            0x17 => Ok(Opcode::LessThan),
+            0x18 => Ok(Opcode::LessEqual),
+            0x19 => Ok(Opcode::GreaterThan),
+            0x1A => Ok(Opcode::GreaterEqual),
+            0x1B => Ok(Opcode::And),
+            0x1C => Ok(Opcode::Or),
+            0x1D => Ok(Opcode::Not),
             _ => Err(BytecodeError::InvalidOpcode(value)),
         }
     }
@@ -110,6 +130,7 @@ enum ValueTag {
     Array = 0x06,
     Object = 0x07,
     Function = 0x08,
+    String = 0x09,  // New tag for String type
 }
 
 /// Binary writer helper
@@ -360,6 +381,61 @@ impl<W: Write> BinaryWriter<W> {
                     self.write_pattern(pattern)?;
                     self.write_i32(*offset as i32)?;
                 }
+            },
+            // Comparison operations
+            Instruction::Equal(dst, a, b) => {
+                self.write_u8(Opcode::Equal as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*a as u32)?;
+                self.write_u32(*b as u32)?;
+            },
+            Instruction::NotEqual(dst, a, b) => {
+                self.write_u8(Opcode::NotEqual as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*a as u32)?;
+                self.write_u32(*b as u32)?;
+            },
+            Instruction::LessThan(dst, a, b) => {
+                self.write_u8(Opcode::LessThan as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*a as u32)?;
+                self.write_u32(*b as u32)?;
+            },
+            Instruction::LessEqual(dst, a, b) => {
+                self.write_u8(Opcode::LessEqual as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*a as u32)?;
+                self.write_u32(*b as u32)?;
+            },
+            Instruction::GreaterThan(dst, a, b) => {
+                self.write_u8(Opcode::GreaterThan as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*a as u32)?;
+                self.write_u32(*b as u32)?;
+            },
+            Instruction::GreaterEqual(dst, a, b) => {
+                self.write_u8(Opcode::GreaterEqual as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*a as u32)?;
+                self.write_u32(*b as u32)?;
+            },
+            // Logical operations
+            Instruction::And(dst, a, b) => {
+                self.write_u8(Opcode::And as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*a as u32)?;
+                self.write_u32(*b as u32)?;
+            },
+            Instruction::Or(dst, a, b) => {
+                self.write_u8(Opcode::Or as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*a as u32)?;
+                self.write_u32(*b as u32)?;
+            },
+            Instruction::Not(dst, src) => {
+                self.write_u8(Opcode::Not as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*src as u32)?;
             },
         }
         Ok(())
@@ -631,6 +707,61 @@ impl<R: Read> BinaryReader<R> {
                     patterns.push((pattern, offset));
                 }
                 Ok(Instruction::Match(src, patterns))
+            },
+            // Comparison operations
+            Opcode::Equal => {
+                let dst = self.read_u32()? as usize;
+                let a = self.read_u32()? as usize;
+                let b = self.read_u32()? as usize;
+                Ok(Instruction::Equal(dst, a, b))
+            },
+            Opcode::NotEqual => {
+                let dst = self.read_u32()? as usize;
+                let a = self.read_u32()? as usize;
+                let b = self.read_u32()? as usize;
+                Ok(Instruction::NotEqual(dst, a, b))
+            },
+            Opcode::LessThan => {
+                let dst = self.read_u32()? as usize;
+                let a = self.read_u32()? as usize;
+                let b = self.read_u32()? as usize;
+                Ok(Instruction::LessThan(dst, a, b))
+            },
+            Opcode::LessEqual => {
+                let dst = self.read_u32()? as usize;
+                let a = self.read_u32()? as usize;
+                let b = self.read_u32()? as usize;
+                Ok(Instruction::LessEqual(dst, a, b))
+            },
+            Opcode::GreaterThan => {
+                let dst = self.read_u32()? as usize;
+                let a = self.read_u32()? as usize;
+                let b = self.read_u32()? as usize;
+                Ok(Instruction::GreaterThan(dst, a, b))
+            },
+            Opcode::GreaterEqual => {
+                let dst = self.read_u32()? as usize;
+                let a = self.read_u32()? as usize;
+                let b = self.read_u32()? as usize;
+                Ok(Instruction::GreaterEqual(dst, a, b))
+            },
+            // Logical operations
+            Opcode::And => {
+                let dst = self.read_u32()? as usize;
+                let a = self.read_u32()? as usize;
+                let b = self.read_u32()? as usize;
+                Ok(Instruction::And(dst, a, b))
+            },
+            Opcode::Or => {
+                let dst = self.read_u32()? as usize;
+                let a = self.read_u32()? as usize;
+                let b = self.read_u32()? as usize;
+                Ok(Instruction::Or(dst, a, b))
+            },
+            Opcode::Not => {
+                let dst = self.read_u32()? as usize;
+                let src = self.read_u32()? as usize;
+                Ok(Instruction::Not(dst, src))
             },
         }
     }

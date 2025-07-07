@@ -70,6 +70,17 @@ pub fn instruction_to_text(instr: &Instruction) -> String {
         },
         Instruction::Yield => "YIELD".to_string(),
         Instruction::Nop => "NOP".to_string(),
+        // Comparison operations
+        Instruction::Equal(dst, a, b) => format!("EQUAL r{}, r{}, r{}", dst, a, b),
+        Instruction::NotEqual(dst, a, b) => format!("NOT_EQUAL r{}, r{}, r{}", dst, a, b),
+        Instruction::LessThan(dst, a, b) => format!("LESS_THAN r{}, r{}, r{}", dst, a, b),
+        Instruction::LessEqual(dst, a, b) => format!("LESS_EQUAL r{}, r{}, r{}", dst, a, b),
+        Instruction::GreaterThan(dst, a, b) => format!("GREATER_THAN r{}, r{}, r{}", dst, a, b),
+        Instruction::GreaterEqual(dst, a, b) => format!("GREATER_EQUAL r{}, r{}, r{}", dst, a, b),
+        // Logical operations
+        Instruction::And(dst, a, b) => format!("AND r{}, r{}, r{}", dst, a, b),
+        Instruction::Or(dst, a, b) => format!("OR r{}, r{}, r{}", dst, a, b),
+        Instruction::Not(dst, src) => format!("NOT r{}, r{}", dst, src),
     }
 }
 
@@ -84,6 +95,7 @@ pub fn value_to_text(val: &Value) -> String {
             }
         },
         Value::Primitive(Primitive::Boolean(b)) => b.to_string(),
+        Value::Primitive(Primitive::String(s)) => format!("\"{}\"", s.replace("\\", "\\\\").replace("\"", "\\\"")),
         Value::Primitive(Primitive::Atom(s)) => format!("'{}'", s.replace("'", "\\'")),
         Value::Primitive(Primitive::Unit) => "()".to_string(),
         Value::Primitive(Primitive::Undefined) => "undefined".to_string(),

@@ -37,6 +37,17 @@ pub enum Instruction {
     Match(usize, Vec<(Pattern, isize)>), // src, pattern table (pattern, jump offset)
     Yield,                               // Explicit yield point
     Nop,
+    // Comparison operations
+    Equal(usize, usize, usize),          // dst, a, b - equality comparison
+    NotEqual(usize, usize, usize),       // dst, a, b - inequality comparison
+    LessThan(usize, usize, usize),       // dst, a, b - less than comparison
+    LessEqual(usize, usize, usize),      // dst, a, b - less than or equal
+    GreaterThan(usize, usize, usize),    // dst, a, b - greater than comparison
+    GreaterEqual(usize, usize, usize),   // dst, a, b - greater than or equal
+    // Logical operations
+    And(usize, usize, usize),            // dst, a, b - logical AND
+    Or(usize, usize, usize),             // dst, a, b - logical OR
+    Not(usize, usize),                   // dst, src - logical NOT
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -909,6 +920,206 @@ impl IonVM {
             Instruction::Nop => {
                 ExecutionResult::Continue
             }
+            
+            // Comparison operations
+            Instruction::Equal(dst, a_reg, b_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let result = match (&frame.registers[a_reg], &frame.registers[b_reg]) {
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(a)),
+                            Value::Primitive(crate::value::Primitive::Number(b))
+                        ) => a == b,
+                        (
+                            Value::Primitive(crate::value::Primitive::Boolean(a)),
+                            Value::Primitive(crate::value::Primitive::Boolean(b))
+                        ) => a == b,
+                        (
+                            Value::Primitive(crate::value::Primitive::String(a)),
+                            Value::Primitive(crate::value::Primitive::String(b))
+                        ) => a == b,
+                        (
+                            Value::Primitive(crate::value::Primitive::Atom(a)),
+                            Value::Primitive(crate::value::Primitive::Atom(b))
+                        ) => a == b,
+                        (
+                            Value::Primitive(crate::value::Primitive::String(s)),
+                            Value::Primitive(crate::value::Primitive::Atom(a))
+                        ) |
+                        (
+                            Value::Primitive(crate::value::Primitive::Atom(a)),
+                            Value::Primitive(crate::value::Primitive::String(s))
+                        ) => s == a,
+                        (
+                            Value::Primitive(crate::value::Primitive::Unit),
+                            Value::Primitive(crate::value::Primitive::Unit)
+                        ) => true,
+                        (
+                            Value::Primitive(crate::value::Primitive::Undefined),
+                            Value::Primitive(crate::value::Primitive::Undefined)
+                        ) => true,
+                        _ => false,
+                    };
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(result));
+                }
+                ExecutionResult::Continue
+            }
+            
+            Instruction::NotEqual(dst, a_reg, b_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let result = match (&frame.registers[a_reg], &frame.registers[b_reg]) {
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(a)),
+                            Value::Primitive(crate::value::Primitive::Number(b))
+                        ) => a != b,
+                        (
+                            Value::Primitive(crate::value::Primitive::Boolean(a)),
+                            Value::Primitive(crate::value::Primitive::Boolean(b))
+                        ) => a != b,
+                        (
+                            Value::Primitive(crate::value::Primitive::String(a)),
+                            Value::Primitive(crate::value::Primitive::String(b))
+                        ) => a != b,
+                        (
+                            Value::Primitive(crate::value::Primitive::Atom(a)),
+                            Value::Primitive(crate::value::Primitive::Atom(b))
+                        ) => a != b,
+                        (
+                            Value::Primitive(crate::value::Primitive::String(s)),
+                            Value::Primitive(crate::value::Primitive::Atom(a))
+                        ) |
+                        (
+                            Value::Primitive(crate::value::Primitive::Atom(a)),
+                            Value::Primitive(crate::value::Primitive::String(s))
+                        ) => s != a,
+                        (
+                            Value::Primitive(crate::value::Primitive::Unit),
+                            Value::Primitive(crate::value::Primitive::Unit)
+                        ) => false,
+                        (
+                            Value::Primitive(crate::value::Primitive::Undefined),
+                            Value::Primitive(crate::value::Primitive::Undefined)
+                        ) => false,
+                        _ => true,
+                    };
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(result));
+                }
+                ExecutionResult::Continue
+            }
+            
+            Instruction::LessThan(dst, a_reg, b_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let result = match (&frame.registers[a_reg], &frame.registers[b_reg]) {
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(a)),
+                            Value::Primitive(crate::value::Primitive::Number(b))
+                        ) => a < b,
+                        (
+                            Value::Primitive(crate::value::Primitive::String(a)),
+                            Value::Primitive(crate::value::Primitive::String(b))
+                        ) => a < b,
+                        (
+                            Value::Primitive(crate::value::Primitive::Atom(a)),
+                            Value::Primitive(crate::value::Primitive::Atom(b))
+                        ) => a < b,
+                        _ => false,
+                    };
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(result));
+                }
+                ExecutionResult::Continue
+            }
+            
+            Instruction::LessEqual(dst, a_reg, b_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let result = match (&frame.registers[a_reg], &frame.registers[b_reg]) {
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(a)),
+                            Value::Primitive(crate::value::Primitive::Number(b))
+                        ) => a <= b,
+                        (
+                            Value::Primitive(crate::value::Primitive::String(a)),
+                            Value::Primitive(crate::value::Primitive::String(b))
+                        ) => a <= b,
+                        (
+                            Value::Primitive(crate::value::Primitive::Atom(a)),
+                            Value::Primitive(crate::value::Primitive::Atom(b))
+                        ) => a <= b,
+                        _ => false,
+                    };
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(result));
+                }
+                ExecutionResult::Continue
+            }
+            
+            Instruction::GreaterThan(dst, a_reg, b_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let result = match (&frame.registers[a_reg], &frame.registers[b_reg]) {
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(a)),
+                            Value::Primitive(crate::value::Primitive::Number(b))
+                        ) => a > b,
+                        (
+                            Value::Primitive(crate::value::Primitive::String(a)),
+                            Value::Primitive(crate::value::Primitive::String(b))
+                        ) => a > b,
+                        (
+                            Value::Primitive(crate::value::Primitive::Atom(a)),
+                            Value::Primitive(crate::value::Primitive::Atom(b))
+                        ) => a > b,
+                        _ => false,
+                    };
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(result));
+                }
+                ExecutionResult::Continue
+            }
+            
+            Instruction::GreaterEqual(dst, a_reg, b_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let result = match (&frame.registers[a_reg], &frame.registers[b_reg]) {
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(a)),
+                            Value::Primitive(crate::value::Primitive::Number(b))
+                        ) => a >= b,
+                        (
+                            Value::Primitive(crate::value::Primitive::String(a)),
+                            Value::Primitive(crate::value::Primitive::String(b))
+                        ) => a >= b,
+                        (
+                            Value::Primitive(crate::value::Primitive::Atom(a)),
+                            Value::Primitive(crate::value::Primitive::Atom(b))
+                        ) => a >= b,
+                        _ => false,
+                    };
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(result));
+                }
+                ExecutionResult::Continue
+            }
+            
+            // Logical operations
+            Instruction::And(dst, a_reg, b_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let a_truthy = self.is_truthy(&frame.registers[a_reg]);
+                    let b_truthy = self.is_truthy(&frame.registers[b_reg]);
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(a_truthy && b_truthy));
+                }
+                ExecutionResult::Continue
+            }
+            
+            Instruction::Or(dst, a_reg, b_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let a_truthy = self.is_truthy(&frame.registers[a_reg]);
+                    let b_truthy = self.is_truthy(&frame.registers[b_reg]);
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(a_truthy || b_truthy));
+                }
+                ExecutionResult::Continue
+            }
+            
+            Instruction::Not(dst, src_reg) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let truthy = self.is_truthy(&frame.registers[src_reg]);
+                    frame.registers[dst] = Value::Primitive(crate::value::Primitive::Boolean(!truthy));
+                }
+                ExecutionResult::Continue
+            }
         }
     }
 
@@ -1009,6 +1220,20 @@ impl IonVM {
                 proc.status = ProcessStatus::Runnable;
                 self.run_queue.push_back(*pid);
             }
+        }
+    }
+
+    /// Check if a value is truthy for logical operations
+    fn is_truthy(&self, value: &Value) -> bool {
+        match value {
+            Value::Primitive(crate::value::Primitive::Boolean(b)) => *b,
+            Value::Primitive(crate::value::Primitive::Number(n)) => *n != 0.0,
+            Value::Primitive(crate::value::Primitive::String(s)) => !s.is_empty(),
+            Value::Primitive(crate::value::Primitive::Atom(a)) => !a.is_empty(),
+            Value::Primitive(crate::value::Primitive::Unit) => false,
+            Value::Primitive(crate::value::Primitive::Undefined) => false,
+            // Other value types are generally truthy
+            _ => true,
         }
     }
 }

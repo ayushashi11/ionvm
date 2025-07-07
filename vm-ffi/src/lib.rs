@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub mod rust_ffi;
+
 pub mod bridge;
 pub mod stdlib;
 // TODO: pub mod python_ffi;

@@ -10,7 +10,8 @@ pub type Atom = String; // Atoms are interned strings in some languages; here, j
 pub enum Primitive {
     Number(f64),
     Boolean(bool),
-    Atom(Atom),
+    String(String),  // Mutable strings for text manipulation
+    Atom(Atom),      // Immutable interned symbols for identifiers
     Unit,
     Undefined,
 }

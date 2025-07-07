@@ -45,6 +45,53 @@ class Instruction:
         """Divide register a by register b, store result in dst."""
         return cls("div", dst, a, b)
     
+    # Comparison operations
+    @classmethod
+    def equal(cls, dst: int, a: int, b: int) -> 'Instruction':
+        """Equality comparison (a == b)."""
+        return cls("equal", dst, a, b)
+    
+    @classmethod
+    def not_equal(cls, dst: int, a: int, b: int) -> 'Instruction':
+        """Inequality comparison (a != b)."""
+        return cls("not_equal", dst, a, b)
+    
+    @classmethod
+    def less_than(cls, dst: int, a: int, b: int) -> 'Instruction':
+        """Less than comparison (a < b)."""
+        return cls("less_than", dst, a, b)
+    
+    @classmethod
+    def less_equal(cls, dst: int, a: int, b: int) -> 'Instruction':
+        """Less than or equal comparison (a <= b)."""
+        return cls("less_equal", dst, a, b)
+    
+    @classmethod
+    def greater_than(cls, dst: int, a: int, b: int) -> 'Instruction':
+        """Greater than comparison (a > b)."""
+        return cls("greater_than", dst, a, b)
+    
+    @classmethod
+    def greater_equal(cls, dst: int, a: int, b: int) -> 'Instruction':
+        """Greater than or equal comparison (a >= b)."""
+        return cls("greater_equal", dst, a, b)
+    
+    # Logical operations
+    @classmethod
+    def logical_and(cls, dst: int, a: int, b: int) -> 'Instruction':
+        """Logical AND operation (a && b)."""
+        return cls("and", dst, a, b)
+    
+    @classmethod
+    def logical_or(cls, dst: int, a: int, b: int) -> 'Instruction':
+        """Logical OR operation (a || b)."""
+        return cls("or", dst, a, b)
+    
+    @classmethod
+    def logical_not(cls, dst: int, src: int) -> 'Instruction':
+        """Logical NOT operation (!src)."""
+        return cls("not", dst, src)
+
     # Property access instructions
     @classmethod
     def get_prop(cls, dst: int, obj: int, key: int) -> 'Instruction':
@@ -145,6 +192,15 @@ class Instruction:
             "match": 0x12,
             "yield": 0x13,
             "nop": 0x14,
+            "equal": 0x15,
+            "not_equal": 0x16,
+            "less_than": 0x17,
+            "less_equal": 0x18,
+            "greater_than": 0x19,
+            "greater_equal": 0x1A,
+            "and": 0x1B,
+            "or": 0x1C,
+            "not": 0x1D,
         }
         
         if self.opcode not in opcodes:
@@ -211,6 +267,18 @@ class Instruction:
         elif self.opcode == "link":
             process, = self.args
             writer.write_u32(process)
+        elif self.opcode in ["equal", "not_equal", "less_than", "less_equal", 
+                           "greater_than", "greater_equal", "and", "or"]:
+            # Three-argument comparison and logical operations
+            dst, a, b = self.args
+            writer.write_u32(dst)
+            writer.write_u32(a)
+            writer.write_u32(b)
+        elif self.opcode == "not":
+            # Two-argument logical NOT operation
+            dst, src = self.args
+            writer.write_u32(dst)
+            writer.write_u32(src)
         elif self.opcode in ["yield", "nop"]:
             # No arguments
             pass
