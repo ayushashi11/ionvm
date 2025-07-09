@@ -19,6 +19,7 @@ pub enum FfiValue {
     String(String),
     Unit,
     Undefined,
+    Tuple(Vec<FfiValue>),
     Array(Vec<FfiValue>),
     Object(HashMap<String, FfiValue>),
 }
@@ -171,6 +172,7 @@ impl FfiValue {
             FfiValue::String(_) => "String",
             FfiValue::Unit => "Unit",
             FfiValue::Undefined => "Undefined",
+            FfiValue::Tuple(_) => "Tuple",
             FfiValue::Array(_) => "Array",
             FfiValue::Object(_) => "Object",
         }
@@ -182,6 +184,7 @@ impl FfiValue {
             FfiValue::Boolean(b) => *b,
             FfiValue::Number(n) => *n != 0.0,
             FfiValue::String(s) => !s.is_empty(),
+            FfiValue::Tuple(arr) => !arr.is_empty() && arr.iter().all(|v| v.is_truthy()),
             FfiValue::Array(arr) => !arr.is_empty(),
             FfiValue::Object(obj) => !obj.is_empty(),
             FfiValue::Unit | FfiValue::Undefined => false,

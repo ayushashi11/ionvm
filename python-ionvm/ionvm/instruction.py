@@ -15,145 +15,145 @@ class Instruction:
     
     # Memory instructions
     @classmethod
-    def load_const(cls, reg: int, value) -> 'Instruction':
+    def load_const(cls, reg: float, value) -> 'Instruction':
         """Load a constant value into a register."""
         return cls("load_const", reg, value)
     
     @classmethod
-    def move(cls, dst: int, src: int) -> 'Instruction':
+    def move(cls, dst: float, src: float) -> 'Instruction':
         """Move value from src register to dst register."""
         return cls("move", dst, src)
     
     # Arithmetic instructions
     @classmethod
-    def add(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def add(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Add values in registers a and b, store result in dst."""
         return cls("add", dst, a, b)
     
     @classmethod
-    def sub(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def sub(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Subtract register b from register a, store result in dst."""
         return cls("sub", dst, a, b)
     
     @classmethod
-    def mul(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def mul(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Multiply values in registers a and b, store result in dst."""
         return cls("mul", dst, a, b)
     
     @classmethod
-    def div(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def div(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Divide register a by register b, store result in dst."""
         return cls("div", dst, a, b)
     
     # Comparison operations
     @classmethod
-    def equal(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def equal(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Equality comparison (a == b)."""
         return cls("equal", dst, a, b)
     
     @classmethod
-    def not_equal(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def not_equal(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Inequality comparison (a != b)."""
         return cls("not_equal", dst, a, b)
     
     @classmethod
-    def less_than(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def less_than(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Less than comparison (a < b)."""
         return cls("less_than", dst, a, b)
     
     @classmethod
-    def less_equal(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def less_equal(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Less than or equal comparison (a <= b)."""
         return cls("less_equal", dst, a, b)
     
     @classmethod
-    def greater_than(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def greater_than(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Greater than comparison (a > b)."""
         return cls("greater_than", dst, a, b)
     
     @classmethod
-    def greater_equal(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def greater_equal(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Greater than or equal comparison (a >= b)."""
         return cls("greater_equal", dst, a, b)
     
     # Logical operations
     @classmethod
-    def logical_and(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def logical_and(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Logical AND operation (a && b)."""
         return cls("and", dst, a, b)
     
     @classmethod
-    def logical_or(cls, dst: int, a: int, b: int) -> 'Instruction':
+    def logical_or(cls, dst: float, a: float, b: float) -> 'Instruction':
         """Logical OR operation (a || b)."""
         return cls("or", dst, a, b)
     
     @classmethod
-    def logical_not(cls, dst: int, src: int) -> 'Instruction':
+    def logical_not(cls, dst: float, src: float) -> 'Instruction':
         """Logical NOT operation (!src)."""
         return cls("not", dst, src)
 
     # Property access instructions
     @classmethod
-    def get_prop(cls, dst: int, obj: int, key: int) -> 'Instruction':
+    def get_prop(cls, dst: float, obj: float, key: float) -> 'Instruction':
         """Get property from object in obj register using key register, store in dst."""
         return cls("get_prop", dst, obj, key)
     
     @classmethod
-    def set_prop(cls, obj: int, key: int, value: int) -> 'Instruction':
+    def set_prop(cls, obj: float, key: float, value: float) -> 'Instruction':
         """Set property on object in obj register using key and value registers."""
         return cls("set_prop", obj, key, value)
     
     # Function call instructions
     @classmethod
-    def call(cls, dst: int, func: int, args: List[int]) -> 'Instruction':
+    def call(cls, dst: float, func: float, args: List[float]) -> 'Instruction':
         """Call function in func register with args, store result in dst."""
         return cls("call", dst, func, args)
     
     # Control flow instructions
     @classmethod
-    def return_reg(cls, reg: int) -> 'Instruction':
+    def return_reg(cls, reg: float) -> 'Instruction':
         """Return value from register."""
         return cls("return", reg)
     
     @classmethod
-    def jump(cls, offset: int) -> 'Instruction':
+    def jump(cls, offset: float) -> 'Instruction':
         """Unconditional jump by offset."""
         return cls("jump", offset)
     
     @classmethod
-    def jump_if_true(cls, cond: int, offset: int) -> 'Instruction':
+    def jump_if_true(cls, cond: float, offset: float) -> 'Instruction':
         """Jump by offset if condition register is true."""
         return cls("jump_if_true", cond, offset)
     
     @classmethod
-    def jump_if_false(cls, cond: int, offset: int) -> 'Instruction':
+    def jump_if_false(cls, cond: float, offset: float) -> 'Instruction':
         """Jump by offset if condition register is false."""
         return cls("jump_if_false", cond, offset)
     
     # Process instructions
     @classmethod
-    def spawn(cls, dst: int, func: int, args: List[int]) -> 'Instruction':
+    def spawn(cls, dst: float, func: float, args: List[float]) -> 'Instruction':
         """Spawn new process with function and args, store process handle in dst."""
         return cls("spawn", dst, func, args)
     
     @classmethod
-    def send(cls, process: int, message: int) -> 'Instruction':
+    def send(cls, process: float, message: float) -> 'Instruction':
         """Send message to process."""
         return cls("send", process, message)
     
     @classmethod
-    def receive(cls, dst: int) -> 'Instruction':
+    def receive(cls, dst: float) -> 'Instruction':
         """Receive message into dst register."""
         return cls("receive", dst)
     
     @classmethod
-    def link(cls, process: int) -> 'Instruction':
+    def link(cls, process: float) -> 'Instruction':
         """Link to process for fault tolerance."""
         return cls("link", process)
     
     # Pattern matching
     @classmethod
-    def match(cls, value: int, patterns: List, jump_table: List[int]) -> 'Instruction':
+    def match(cls, value: float, patterns: List, jump_table: List[float]) -> 'Instruction':
         """Pattern match value against patterns with jump table."""
         return cls("match", value, patterns, jump_table)
     
@@ -167,6 +167,16 @@ class Instruction:
     def nop(cls) -> 'Instruction':
         """No operation."""
         return cls("nop")
+    
+    @classmethod
+    def break_instr(cls) -> 'Instruction':
+        """Break out of a loop or control structure."""
+        return cls("break")
+
+    @classmethod
+    def continue_instr(cls) -> 'Instruction':
+        """Continue to the next iteration of a loop."""
+        return cls("continue")
     
     def serialize(self, writer) -> None:
         """Serialize this instruction to binary format."""

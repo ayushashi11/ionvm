@@ -23,7 +23,7 @@ pub enum Value {
     Array(Rc<RefCell<Vec<Value>>>),
     Object(Rc<RefCell<Object>>),
     TaggedEnum(Rc<TaggedEnum>),
-    Function(Rc<Function>),
+    Function(Rc<RefCell<Function>>),
     Closure(Rc<Closure>),
     Process(Rc<RefCell<Process>>),
     // Add more as needed (e.g., native functions, etc.)

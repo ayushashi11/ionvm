@@ -5,8 +5,10 @@
 
 use crate::vm::{Instruction, Pattern};
 use crate::value::{Value, Primitive, Function, FunctionType};
+use std::cell::RefCell;
 use std::io::{self, Read, Write};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Magic bytes for IonVM bytecode files
 pub const BYTECODE_MAGIC: &[u8] = b"IONBC\x01\x00\x00";
@@ -189,6 +191,10 @@ impl<W: Write> BinaryWriter<W> {
                 self.write_u8(ValueTag::Atom as u8)?;
                 self.write_string(s)?;
             },
+            Value::Primitive(Primitive::String(s)) => {
+                self.write_u8(ValueTag::String as u8)?;
+                self.write_string(s)?;
+            },
             Value::Primitive(Primitive::Unit) => {
                 self.write_u8(ValueTag::Unit as u8)?;
             },
@@ -218,7 +224,7 @@ impl<W: Write> BinaryWriter<W> {
             Value::Function(func) => {
                 self.write_u8(ValueTag::Function as u8)?;
                 // Serialize function reference by name
-                if let Some(ref name) = func.name {
+                if let Some(ref name) = func.borrow().name {
                     self.write_string(name)?;
                 } else {
                     self.write_string("anonymous")?;
@@ -498,6 +504,10 @@ impl<R: Read> BinaryReader<R> {
             x if x == ValueTag::Atom as u8 => {
                 let s = self.read_string()?;
                 Ok(Value::Primitive(Primitive::Atom(s)))
+            },
+            x if x == ValueTag::String as u8 => {
+                let s = self.read_string()?;
+                Ok(Value::Primitive(Primitive::String(s)))
             },
             x if x == ValueTag::Unit as u8 => {
                 Ok(Value::Primitive(Primitive::Unit))
@@ -1141,22 +1151,22 @@ pub fn deserialize_function<R: Read>(mut reader: R) -> Result<Function, Bytecode
 /// Deserialize function from binary format with registry
 pub fn deserialize_function_with_registry<R: Read>(
     reader: &mut R, 
-    function_registry: &HashMap<String, Function>
+    function_registry: &HashMap<String, Rc<RefCell<Function>>>
 ) -> Result<Function, BytecodeError> {
     // First, deserialize normally
-    let mut function = deserialize_function(reader)?;
+    let mut function = Rc::new(RefCell::new(deserialize_function(reader)?));
     
     // Then resolve any function references in the bytecode
     resolve_function_references(&mut function, function_registry);
     
-    Ok(function)
+    Ok(function.borrow().clone())
 }
 
 /// Resolve function name references in bytecode to actual Function objects
-pub fn resolve_function_references(function: &mut Function, function_registry: &HashMap<String, Function>) {
+pub fn resolve_function_references(function: &mut Rc<RefCell<Function>>, function_registry: &HashMap<String, Rc<RefCell<Function>>>) {
     use crate::value::{FunctionType};
     
-    if let FunctionType::Bytecode { ref mut bytecode } = function.function_type {
+    if let FunctionType::Bytecode { ref mut bytecode } = function.borrow_mut().function_type {
         for instruction in bytecode.iter_mut() {
             match instruction {
                 Instruction::LoadConst(_, value) => {
@@ -1165,26 +1175,26 @@ pub fn resolve_function_references(function: &mut Function, function_registry: &
                         if name.starts_with("__function_ref:") {
                             let function_name = &name[15..]; // Remove "__function_ref:" prefix
                             if let Some(resolved_function) = function_registry.get(function_name) {
-                                *value = Value::Function(std::rc::Rc::new(resolved_function.clone()));
+                                *value = Value::Function(Rc::clone(resolved_function));
                             }
                         } else if name.starts_with("__stdlib:") {
                             let stdlib_name = &name[9..]; // Remove "__stdlib:" prefix
                             // Create stdlib FFI function
                             match stdlib_name {
                                 "debug" => {
-                                    let debug_fn = Function::new_ffi(
+                                    let debug_fn = RefCell::new(Function::new_ffi(
                                         Some("debug".to_string()),
                                         1,
                                         "Debug".to_string()  // Use the actual FFI function name
-                                    );
+                                    ));
                                     *value = Value::Function(std::rc::Rc::new(debug_fn));
                                 },
                                 "print" => {
-                                    let print_fn = Function::new_ffi(
+                                    let print_fn = RefCell::new(Function::new_ffi(
                                         Some("print".to_string()),
                                         1,
                                         "Print".to_string()  // Use the actual FFI function name
-                                    );
+                                    ));
                                     *value = Value::Function(std::rc::Rc::new(print_fn));
                                 },
                                 _ => {} // Unknown stdlib function

@@ -128,7 +128,7 @@ impl IonVM {
                 arity,
                 function_name.to_string()
             );
-            Some(Value::Function(Rc::new(function)))
+            Some(Value::Function(Rc::new(RefCell::new(function))))
         } else {
             None
         }
@@ -194,7 +194,7 @@ impl IonVM {
                 } else if atom.starts_with("__function_ref:") {
                     // Handle function references - these would normally be resolved at load time
                     // For now, return undefined as they need to be handled by the IonPack loader
-                    Value::Primitive(crate::value::Primitive::Undefined)
+                    panic!("Function references should be resolved at load time: {}", atom);
                 } else if atom.starts_with("__stdlib:") {
                     // Handle stdlib function references
                     if let Some(func) = self.get_stdlib_function(&atom[9..]) {
@@ -423,7 +423,10 @@ impl IonVM {
                 if let Some(frame) = proc.frames.last_mut() {
                     // Handle special __vm: values
                     let resolved_val = self.resolve_vm_value(val, proc.pid);
-                    frame.registers[reg] = resolved_val;
+                    frame.registers[reg] = resolved_val.clone();
+                    // if( self.debug) {
+                        // println!("[VM DEBUG] LOAD_CONST: Loaded {:?} into r{}", resolved_val, reg);
+                    // }
                 }
                 ExecutionResult::Continue
             }
@@ -619,13 +622,14 @@ impl IonVM {
                     let condition = &frame.registers[cond_reg];
                     let should_jump = match condition {
                         Value::Primitive(crate::value::Primitive::Boolean(true)) => true,
-                        Value::Primitive(crate::value::Primitive::Number(x)) => *x != 0.0,
-                        Value::Primitive(crate::value::Primitive::Undefined) => false,
-                        _ => true, // Most values are truthy
+                        _ => self.is_truthy(condition), // Most values are truthy
                     };
                     
                     if should_jump {
                         let new_ip = (frame.ip as isize + offset - 1) as usize;
+                        if self.debug {
+                                    println!("[VM DEBUG] JUMPIFTRUE: Pattern matched, jumping to IP {} from {}", new_ip, frame.ip);
+                            }
                         frame.ip = new_ip;
                     }
                 }
@@ -637,13 +641,15 @@ impl IonVM {
                     let condition = &frame.registers[cond_reg];
                     let should_jump = match condition {
                         Value::Primitive(crate::value::Primitive::Boolean(false)) => true,
-                        Value::Primitive(crate::value::Primitive::Number(x)) => *x == 0.0,
-                        Value::Primitive(crate::value::Primitive::Undefined) => true,
-                        _ => false, // Most values are truthy
+                        _ => !self.is_truthy(condition), // Most values are truthy
                     };
                     
                     if should_jump {
                         let new_ip = (frame.ip as isize + offset - 1) as usize;
+                        if self.debug {
+                            println!("[VM DEBUG] JUMPIFFALSE: Checking condition {:?}", condition);
+                                    println!("[VM DEBUG] JUMPIFFALSE: Pattern matched, jumping to IP {} from {}", new_ip, frame.ip);
+                            }
                         frame.ip = new_ip;
                     }
                 }
@@ -660,22 +666,21 @@ impl IonVM {
                         .collect();
                     (func_value, args)
                 };
-                
                 match func_value {
                     Value::Function(func_rc) => {
-                        match &func_rc.function_type {
+                        match &func_rc.borrow().function_type {
                             crate::value::FunctionType::Bytecode { bytecode: _ } => {
                                 // Regular bytecode function call
                                 let mut new_registers = args;
                                 // Ensure we have enough registers for the function's needs
-                                let total_regs = func_rc.total_registers().max(16); // Minimum 16 registers for compatibility
+                                let total_regs = func_rc.borrow().total_registers().max(16); // Minimum 16 registers for compatibility
                                 new_registers.resize(total_regs, Value::Primitive(crate::value::Primitive::Undefined));
                                 
                                 let new_frame = Frame {
                                     registers: new_registers,
                                     stack: Vec::new(),
                                     ip: 0,
-                                    function: func_rc,
+                                    function: Rc::new(func_rc.borrow().clone()),
                                     return_value: None,
                                     caller_return_reg: Some(dst_reg),
                                 };
@@ -727,6 +732,7 @@ impl IonVM {
                     
                     _ => {
                         // Not a callable - set result to Undefined and continue
+                        panic!("Attempted to call non-function value: {:?}", func_value);
                         if let Some(frame) = proc.frames.last_mut() {
                             frame.registers[dst_reg] = Value::Primitive(crate::value::Primitive::Undefined);
                         }
@@ -753,7 +759,8 @@ impl IonVM {
 
                 // Spawn based on function type
                 match func_value {
-                    Value::Function(func_rc) => {
+                    Value::Function(func_rc_refcell) => {
+                        let func_rc = func_rc_refcell.borrow();
                         if self.debug {
                             // Debug: Log spawn arguments
                             if self.debug {
@@ -776,7 +783,7 @@ impl IonVM {
                         }
                         
                         // Spawn a new process with this function
-                        let new_pid = self.spawn_process(func_rc, args);
+                        let new_pid = self.spawn_process(Rc::new(func_rc_refcell.borrow().clone()), args);
                         
                         // Store the process reference in the destination register
                         if let Some(new_process) = self.processes.get(&new_pid) {
@@ -907,6 +914,9 @@ impl IonVM {
                         // Pattern matched - jump to the corresponding offset
                         if let Some(frame) = proc.frames.last_mut() {
                             let new_ip = (frame.ip as isize + jump_offset - 1) as usize;
+                            if self.debug {
+                                    println!("[VM DEBUG] MATCH: Pattern matched, jumping to IP {} from {}", new_ip, frame.ip);
+                            }
                             frame.ip = new_ip;
                         }
                         return ExecutionResult::Continue;
@@ -1427,7 +1437,7 @@ mod tests {
         let mut vm = IonVM::new();
         
         // Inner function: add two numbers
-        let add_func = Rc::new(Function::new_bytecode(
+        let add_func = Rc::new(RefCell::new(Function::new_bytecode(
             Some("add".to_string()),
             2,
             1,  // extra_regs - arity 2 + 1 extra register (for register 2)
@@ -1435,7 +1445,7 @@ mod tests {
                 Instruction::Add(2, 0, 1),  // r2 = r0 + r1 (args)
                 Instruction::Return(2),
             ]
-        ));
+        )));
         
         // Outer function: call add(5, 7)
         let main_func = Rc::new(Function::new_bytecode(
@@ -1466,7 +1476,7 @@ mod tests {
         let mut vm = IonVM::new();
         
         // Child process: receive a message and return it
-        let child_func = Rc::new(Function::new_bytecode(
+        let child_func = Rc::new(RefCell::new(Function::new_bytecode(
             Some("child".to_string()),
             0,
             1,  // extra_regs - uses register 0
@@ -1474,7 +1484,7 @@ mod tests {
                 Instruction::Receive(0),  // r0 = receive message
                 Instruction::Return(0),
             ]
-        ));
+        )));
         
         // Parent process: spawn child, send message, return
         let parent_func = Rc::new(Function::new_bytecode(

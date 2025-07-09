@@ -32,9 +32,11 @@ def main():
             Instruction.spawn(8, 3, [4]),  # r8 = spawn(worker, [self])
             
             # Send a computation task to worker
-            Instruction.load_const(12, Value.number(15.0)),
+            Instruction.load_const(12, Value.number(11.23)),
             Instruction.send(8, 12),  # send(worker, 15)
-            
+            Instruction.load_const(15, Value.atom("__stdlib:debug")),  # r15 = 15
+            Instruction.load_const(16, Value.string("main")),
+            Instruction.call(17, 15, [16]),  # r17 = debug("worker")
             # Wait for result from worker
             Instruction.receive(16),  # r16 = receive() (should get 225 = 15*15)
             
@@ -54,7 +56,9 @@ def main():
             
             # Square the number: result = number * number
             Instruction.mul(2, 1, 1),  # r2 = r1 * r1
-            
+            Instruction.load_const(15, Value.atom("__stdlib:debug")),  # r15 = 15
+            Instruction.load_const(16, Value.string("worker")),
+            Instruction.call(17, 15, [16]), 
             # Send result back to coordinator (r0 contains coordinator process)
             Instruction.send(0, 2),  # send(coordinator, result)
             

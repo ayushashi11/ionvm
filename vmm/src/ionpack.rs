@@ -9,10 +9,12 @@
 
 use crate::bytecode_binary::{serialize_function, serialize_functions, deserialize_functions_auto, resolve_function_references, BytecodeError};
 use crate::value::Function;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write, Seek};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use zip::{ZipWriter, ZipArchive, write::FileOptions, CompressionMethod};
 
 /// Magic identifier for IonPack files
@@ -464,19 +466,19 @@ impl<R: Read + Seek> IonPackReader<R> {
     }
 
     /// Load a function and resolve any embedded function references
-    pub fn load_function_with_registry(&mut self, function_name: &str, function_registry: &HashMap<String, Function>) -> Result<Function, IonPackError> {
-        let bytecode = self.read_class(function_name)?;
+    // pub fn load_function_with_registry(&mut self, function_name: &str, function_registry: &HashMap<String, Function>) -> Result<Function, IonPackError> {
+    //     let bytecode = self.read_class(function_name)?;
         
-        use crate::bytecode_binary::deserialize_function_with_registry;
-        use std::io::Cursor;
+    //     use crate::bytecode_binary::deserialize_function_with_registry;
+    //     use std::io::Cursor;
         
-        let mut cursor = Cursor::new(bytecode);
-        deserialize_function_with_registry(&mut cursor, function_registry)
-            .map_err(|e| IonPackError::BytecodeError(e))
-    }
+    //     let mut cursor = Cursor::new(bytecode);
+    //     deserialize_function_with_registry(&mut cursor, function_registry)
+    //         .map_err(|e| IonPackError::BytecodeError(e))
+    // }
 
     /// Load all functions from the IonPack into a registry (supports multi-function classes)
-    pub fn load_all_functions(&mut self) -> Result<HashMap<String, Function>, IonPackError> {
+    pub fn load_all_functions(&mut self) -> Result<HashMap<String, Rc<RefCell<Function>>>, IonPackError> {
         let class_names = self.list_classes()?;
         let mut functions = HashMap::new();
         let mut class_functions_map = HashMap::new();
@@ -517,9 +519,9 @@ impl<R: Read + Seek> IonPackReader<R> {
                 
                 if let Some(ref function_name) = function.name {
                     //resolved_functions.insert(function_name.clone(), function.clone());
-                    resolved_functions.insert(format!("{}:{}", class_name, function_name), function);
+                    resolved_functions.insert(format!("{}:{}", class_name, function_name), Rc::new(RefCell::new(function)));
                 } else {
-                    resolved_functions.insert(class_name.clone(), function);
+                    resolved_functions.insert(class_name.clone(), Rc::new(RefCell::new(function)));
                 }
             }
         }
@@ -555,13 +557,14 @@ impl<R: Read + Seek> IonPackReader<R> {
             // First check if Entry-Point is specified
             if let Some(ref entry_point) = self.manifest.entry_point {
                 if let Some(function) = fns.get(format!("{}:{}", main_class, entry_point).as_str()) {
-                    return Ok(function.clone());
+                    return Ok(function.borrow().clone());
                 } else {
                     return Err(IonPackError::FunctionNotFound(entry_point.clone()));
                 }
             }
             
-            if let Some(function) = fns.get(format!("{}:main", main_class).as_str()) {
+            if let Some(function_ref) = fns.get(format!("{}:main", main_class).as_str()) {
+                let function = function_ref.borrow();
                 // If it's a multi-function class, find the first function with arity 0
                 if function.arity == 0 {
                     return Ok(function.clone());

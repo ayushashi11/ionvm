@@ -80,7 +80,9 @@
         "actors.ionpack",
         "complex.ionpack", 
         "hello.ionpack",
-        "unified-actors.ionpack"
+        "unified-actors.ionpack",
+        "comparison_test.ionpack",
+        "improved_control_flow_demo.ionpack"
       ]
     }
   ]

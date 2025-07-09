@@ -29,6 +29,11 @@ class Value:
         return cls("atom", str(s))
     
     @classmethod
+    def string(cls, s: str) -> 'Value':
+        """Create a string value."""
+        return cls("string", str(s))
+    
+    @classmethod
     def unit(cls) -> 'Value':
         """Create a unit value."""
         return cls("unit", None)
@@ -84,6 +89,9 @@ class Value:
             writer.write_u8(1 if self.data else 0)
         elif self.value_type == "atom":
             writer.write_u8(0x03)  # Atom tag
+            writer.write_string(self.data)
+        elif self.value_type == "string":
+            writer.write_u8(0x09)
             writer.write_string(self.data)
         elif self.value_type == "unit":
             writer.write_u8(0x04)  # Unit tag

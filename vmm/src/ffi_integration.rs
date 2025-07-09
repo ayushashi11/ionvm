@@ -12,21 +12,38 @@ impl ToFfiValue for Value {
         match self {
             Value::Primitive(Primitive::Number(n)) => FfiValue::Number(*n),
             Value::Primitive(Primitive::Boolean(b)) => FfiValue::Boolean(*b),
-            Value::Primitive(Primitive::String(s)) => FfiValue::String(s.clone()),
+            Value::Primitive(Primitive::String(s)) => FfiValue::String(format!("\"{}\"",s.clone())),
             Value::Primitive(Primitive::Atom(s)) => FfiValue::String(s.clone()),
             Value::Primitive(Primitive::Unit) => FfiValue::Unit,
             Value::Primitive(Primitive::Undefined) => FfiValue::Undefined,
             
             // For complex types, we could serialize them or provide references
             // For now, we'll convert them to strings
-            Value::Tuple(_) => FfiValue::String("[Tuple]".to_string()),
+            Value::Tuple(arr) => {
+                // Convert tuple elements
+                let arr_borrow = arr.clone();
+                let ffi_values: Vec<FfiValue> = arr_borrow.iter().map(|v| v.to_ffi()).collect();
+                FfiValue::Tuple(ffi_values)
+            },
             Value::Array(arr) => {
                 // Convert array elements
                 let arr_borrow = arr.borrow();
                 let ffi_values: Vec<FfiValue> = arr_borrow.iter().map(|v| v.to_ffi()).collect();
                 FfiValue::Array(ffi_values)
             },
-            Value::Object(_) => FfiValue::String("[Object]".to_string()),
+            Value::Object( obj) => {
+                // Convert object properties to FFI values
+                use crate::value::{Object, PropertyDescriptor};
+                use std::cell::RefCell;
+                use std::rc::Rc;
+
+                let obj_borrow = obj.borrow();
+                let mut ffi_obj = std::collections::HashMap::new();
+                for (key, desc) in &obj_borrow.properties {
+                    ffi_obj.insert(key.clone(), desc.value.to_ffi());
+                }
+                FfiValue::Object(ffi_obj)
+            },
             Value::TaggedEnum(_) => FfiValue::String("[TaggedEnum]".to_string()),
             Value::Function(_) => FfiValue::String("[Function]".to_string()),
             Value::Closure(_) => FfiValue::String("[Closure]".to_string()),
@@ -44,7 +61,16 @@ impl FromFfiValue for Value {
             FfiValue::String(s) => Ok(Value::Primitive(Primitive::Atom(s))),
             FfiValue::Unit => Ok(Value::Primitive(Primitive::Unit)),
             FfiValue::Undefined => Ok(Value::Primitive(Primitive::Undefined)),
-            
+            FfiValue::Tuple(arr) => {
+                // Convert FFI tuple to VM tuples
+                use std::rc::Rc;
+                
+                let mut vm_values = Vec::new();
+                for ffi_val in arr {
+                    vm_values.push(Value::from_ffi(ffi_val)?);
+                }
+                Ok(Value::Tuple(Rc::new(vm_values)))
+            },
             FfiValue::Array(arr) => {
                 use std::cell::RefCell;
                 use std::rc::Rc;

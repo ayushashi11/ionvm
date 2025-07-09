@@ -48,6 +48,10 @@ fn format_value(value: &FfiValue) -> String {
         FfiValue::Boolean(b) => b.to_string(),
         FfiValue::Unit => "()".to_string(),
         FfiValue::Undefined => "undefined".to_string(),
+        FfiValue::Tuple(arr) => {
+            let items: Vec<String> = arr.iter().map(format_value).collect();
+            format!("({})", items.join(", "))
+        },
         FfiValue::Array(arr) => {
             let items: Vec<String> = arr.iter().map(format_value).collect();
             format!("[{}]", items.join(", "))
@@ -71,7 +75,6 @@ io_function!(Print, 1, "Print a value to stdout without newline", |args| {
 
 io_function!(PrintLn, 1, "Print a value to stdout with newline", |args| {
     let output = format_value(&args[0]);
-    println!("{:?}", &args[0]);
     println!("{}", output);
     Ok(FfiValue::Unit)
 });
