@@ -60,6 +60,7 @@ pub fn instruction_to_text(instr: &Instruction) -> String {
         },
         Instruction::Send(proc, msg) => format!("SEND r{}, r{}", proc, msg),
         Instruction::Receive(dst) => format!("RECEIVE r{}", dst),
+        Instruction::ReceiveWithTimeout(dst, timeout, result) => format!("RECEIVE_WITH_TIMEOUT r{}, r{}, r{}", dst, timeout, result),
         Instruction::Link(proc) => format!("LINK r{}", proc),
         Instruction::Match(src, patterns) => {
             let patterns_str = patterns.iter()

@@ -80,6 +80,7 @@ enum Opcode {
     And = 0x1B,
     Or = 0x1C,
     Not = 0x1D,
+    ReceiveWithTimeout = 0x1E,
 }
 
 impl TryFrom<u8> for Opcode {
@@ -116,6 +117,7 @@ impl TryFrom<u8> for Opcode {
             0x1B => Ok(Opcode::And),
             0x1C => Ok(Opcode::Or),
             0x1D => Ok(Opcode::Not),
+            0x1E => Ok(Opcode::ReceiveWithTimeout),
             _ => Err(BytecodeError::InvalidOpcode(value)),
         }
     }
@@ -374,6 +376,12 @@ impl<W: Write> BinaryWriter<W> {
             Instruction::Receive(dst) => {
                 self.write_u8(Opcode::Receive as u8)?;
                 self.write_u32(*dst as u32)?;
+            },
+            Instruction::ReceiveWithTimeout(dst, timeout, result) => {
+                self.write_u8(Opcode::ReceiveWithTimeout as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*timeout as u32)?;
+                self.write_u32(*result as u32)?;
             },
             Instruction::Link(proc) => {
                 self.write_u8(Opcode::Link as u8)?;
@@ -702,6 +710,12 @@ impl<R: Read> BinaryReader<R> {
             Opcode::Receive => {
                 let dst = self.read_u32()? as usize;
                 Ok(Instruction::Receive(dst))
+            },
+            Opcode::ReceiveWithTimeout => {
+                let dst = self.read_u32()? as usize;
+                let timeout = self.read_u32()? as usize;
+                let result = self.read_u32()? as usize;
+                Ok(Instruction::ReceiveWithTimeout(dst, timeout, result))
             },
             Opcode::Link => {
                 let proc = self.read_u32()? as usize;

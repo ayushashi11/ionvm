@@ -147,6 +147,11 @@ class Instruction:
         return cls("receive", dst)
     
     @classmethod
+    def receive_with_timeout(cls, dst: float, timeout: float, result: float) -> 'Instruction':
+        """Receive message into dst register with timeout, store result in result register."""
+        return cls("receive_with_timeout", dst, timeout, result)
+    
+    @classmethod
     def link(cls, process: float) -> 'Instruction':
         """Link to process for fault tolerance."""
         return cls("link", process)
@@ -170,12 +175,12 @@ class Instruction:
     
     @classmethod
     def break_instr(cls) -> 'Instruction':
-        """Break out of a loop or control structure."""
+        """Break out of a loop or control structure.(Placeholder opcode, shouldnt appear in final code)"""
         return cls("break")
 
     @classmethod
     def continue_instr(cls) -> 'Instruction':
-        """Continue to the next iteration of a loop."""
+        """Continue to the next iteration of a loop.(Placeholder opcode, shouldnt appear in final code)"""
         return cls("continue")
     
     def serialize(self, writer) -> None:
@@ -211,6 +216,7 @@ class Instruction:
             "and": 0x1B,
             "or": 0x1C,
             "not": 0x1D,
+            "receive_with_timeout": 0x1E,
         }
         
         if self.opcode not in opcodes:
@@ -274,6 +280,11 @@ class Instruction:
         elif self.opcode == "receive":
             dst, = self.args
             writer.write_u32(dst)
+        elif self.opcode == "receive_with_timeout":
+            dst, timeout, result = self.args
+            writer.write_u32(dst)
+            writer.write_u32(timeout)
+            writer.write_u32(result)
         elif self.opcode == "link":
             process, = self.args
             writer.write_u32(process)

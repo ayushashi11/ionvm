@@ -220,7 +220,7 @@ class IfElseBuilder:
             if i < len(self.conditions) - 1 or self.has_else:
                 end_jump = Instruction.jump(0)  # Placeholder offset
                 instructions.append(end_jump)
-                jump_patches.append((len(instructions) - 1, 'end', None))
+                jump_patches.append((len(instructions), 'end', None))
             
             # Record where this condition should jump if false
             if i < len(self.conditions) - 1:
@@ -240,6 +240,7 @@ class IfElseBuilder:
         
         # Calculate jump targets
         end_address = len(instructions)
+        print(f"End address: {end_address}")
         
         # Now we need to find where each condition starts by scanning through the instructions
         # We'll rebuild the condition start positions by walking through the instruction stream
@@ -261,19 +262,20 @@ class IfElseBuilder:
             instruction_index += len(block)
             
             # Skip over the jump to end (if present)
-            if i < len(self.conditions) or self.has_else:
+            if i < len(self.conditions) - 1 or self.has_else:
                 instruction_index += 1
         
         # Patch the jumps
         for patch_index, target_type, target_index in jump_patches:
             if target_type == 'end':
-                offset = end_address - patch_index - 1
+                offset = end_address - patch_index - (1 if self.has_else else 0)
             elif target_type == 'next_condition':
                 offset = condition_starts[target_index] - patch_index
             elif target_type == 'else':
                 offset = else_start - patch_index
             else:
                 raise ValueError(f"Unknown target type: {target_type}")
+            print(f"Patch {patch_index} to {target_type} with offset {offset}")
             
             # Update the instruction's offset
             instruction = instructions[patch_index]

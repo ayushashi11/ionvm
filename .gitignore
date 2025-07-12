@@ -2,3 +2,5 @@
 *_old.rs
 *.lock
 *.pyc
+python-ionvm/build
+python-ionvm/ionvm.egg-info

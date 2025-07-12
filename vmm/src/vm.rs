@@ -4,6 +4,17 @@ use vm_ffi::FfiRegistry;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// Timeout tracking for receive_with_timeout operations
+#[derive(Debug)]
+struct TimeoutInfo {
+    pid: usize,
+    dst_reg: usize,
+    result_reg: usize,
+    expiry_ms: u64, // When timeout expires (milliseconds since UNIX_EPOCH)
+    frame_index: usize, // Index of the frame for this timeout
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionResult {
@@ -33,6 +44,7 @@ pub enum Instruction {
     Spawn(usize, usize, Vec<usize>),     // dst, func, args
     Send(usize, usize),                  // proc, msg
     Receive(usize),                      // dst
+    ReceiveWithTimeout(usize, usize, usize), // dst, timeout_reg, result_reg
     Link(usize),                         // proc
     Match(usize, Vec<(Pattern, isize)>), // src, pattern table (pattern, jump offset)
     Yield,                               // Explicit yield point
@@ -78,6 +90,7 @@ pub struct IonVM {
     pub ffi_registry: FfiRegistry,
     stdlib_functions: Option<HashMap<String, Value>>, // For stdlib function references
     pub debug: bool, // Enable debug output
+    pending_timeouts: Vec<TimeoutInfo>, // Track pending timeout operations
 }
 
 impl IonVM {
@@ -91,6 +104,7 @@ impl IonVM {
             ffi_registry: FfiRegistry::with_stdlib(),
             stdlib_functions: None,
             debug: false,
+            pending_timeouts: Vec::new(),
         }
     }
 
@@ -105,6 +119,7 @@ impl IonVM {
             ffi_registry,
             stdlib_functions: None,
             debug: false,
+            pending_timeouts: Vec::new(),
         }
     }
 
@@ -112,7 +127,54 @@ impl IonVM {
     pub fn set_debug(&mut self, debug: bool) {
         self.debug = debug;
     }
-
+    
+    /// Check for expired timeouts and handle them
+    pub fn handle_expired_timeouts(&mut self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        
+        let mut expired_timeouts = Vec::new();
+        let mut remaining_timeouts = Vec::new();
+        
+        // Split expired and remaining timeouts
+        for timeout in self.pending_timeouts.drain(..) {
+            if current_time >= timeout.expiry_ms {
+                expired_timeouts.push(timeout);
+            } else {
+                remaining_timeouts.push(timeout);
+            }
+        }
+        
+        // Keep the remaining timeouts
+        self.pending_timeouts = remaining_timeouts;
+        
+        // Handle expired timeouts
+        for timeout in expired_timeouts {
+            if let Some(process_rc) = self.processes.get(&timeout.pid) {
+                let mut proc = process_rc.borrow_mut();
+                if proc.status == ProcessStatus::WaitingForMessage {
+                    // Set timeout result to false in the correct frame
+                    if let Some(frame) = proc.frames.get_mut(timeout.frame_index) {
+                        frame.registers[timeout.result_reg] = Value::Primitive(crate::value::Primitive::Boolean(false));
+                        if self.debug {
+                            println!("[VM DEBUG] TIMEOUT: Process {} timed out, set result r{} to false (frame_index {})", timeout.pid, timeout.result_reg, timeout.frame_index);
+                        }
+                        //increase ip
+                        proc.frames.last_mut().unwrap().ip += 1; // Adjust IP to continue execution
+                    }
+                    // Unblock the process
+                    proc.status = ProcessStatus::Runnable;
+                    self.run_queue.push_back(timeout.pid);
+                    if self.debug {
+                        println!("[VM DEBUG] TIMEOUT: Process {} unblocked due to timeout", timeout.pid);
+                    }
+                }
+            }
+        }
+    }
+    
     /// Create a new VM with debug enabled
     pub fn with_debug() -> Self {
         let mut vm = Self::new();
@@ -604,6 +666,55 @@ impl IonVM {
                         }
                     }
                     ExecutionResult::Blocked
+                }
+            }
+            
+            Instruction::ReceiveWithTimeout(dst, timeout_reg, result_reg) => {
+                if self.debug {
+                    println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: Process {} trying to receive into r{} with timeout from r{}, result to r{}", proc.pid, dst, timeout_reg, result_reg);
+                    println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: Mailbox size: {}", proc.mailbox.len());
+                }
+                if let Some(msg) = proc.mailbox.pop() {
+                    if self.debug {
+                        println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: Got message: {:?}", msg);
+                    }
+                    if let Some(frame) = proc.frames.last_mut() {
+                        frame.registers[dst] = msg;
+                        frame.registers[result_reg] = Value::Primitive(crate::value::Primitive::Boolean(true));
+                        if self.debug {
+                            println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: Stored message in r{}, set result r{} to true", dst, result_reg);
+                        }
+                    }
+                    ExecutionResult::Continue
+                } else {
+                    // Get timeout value from register (in milliseconds)
+                    let frame_index = proc.frames.len().saturating_sub(1);
+                    if let Some(frame) = proc.frames.last() {
+                        if let Value::Primitive(crate::value::Primitive::Number(timeout_ms)) = &frame.registers[timeout_reg] {
+                            let current_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let expiry_time = current_time + (*timeout_ms as u64);
+                            // Store frame index in TimeoutInfo
+                            self.pending_timeouts.push(TimeoutInfo {
+                                pid: proc.pid,
+                                dst_reg: dst,
+                                result_reg: result_reg,
+                                expiry_ms: expiry_time,
+                                frame_index,
+                            });
+                            if self.debug {
+                                println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: No message available, set timeout for {}ms (expires at {}), frame_index {}", timeout_ms, expiry_time, frame_index);
+                            }
+                            proc.status = ProcessStatus::WaitingForMessage;
+                            ExecutionResult::Blocked
+                        } else {
+                            ExecutionResult::Error("Timeout value must be a number".to_string())
+                        }
+                    } else {
+                        ExecutionResult::Error("No frame available for timeout operation".to_string())
+                    }
                 }
             }
             
