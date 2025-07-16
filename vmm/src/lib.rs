@@ -4,6 +4,7 @@ pub mod ffi_integration;
 pub mod bytecode_binary;
 pub mod ionpack;
 pub mod bytecode_text;
+#[cfg(test)]
 pub mod vm_timeout_tests;
 
 #[cfg(test)]

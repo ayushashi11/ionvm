@@ -39,6 +39,24 @@
     {
       "type": "lldb",
       "request": "launch",
+      "name": "Debug iondis",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=iondis",
+          "--package=vmm"
+        ],
+        "filter": {
+          "name": "iondis",
+          "kind": "bin"
+        }
+      },
+      "args": ["${input:ionpackFile}", "Main"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
       "name": "Debug create_sample",
       "cargo": {
         "args": [
@@ -82,7 +100,8 @@
         "hello.ionpack",
         "unified-actors.ionpack",
         "comparison_test.ionpack",
-        "improved_control_flow_demo.ionpack"
+        "improved_control_flow_demo.ionpack",
+        "main.ionpack"
       ]
     }
   ]

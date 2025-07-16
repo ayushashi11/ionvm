@@ -1,3 +1,56 @@
+/// Argument for object initialization: can be a register or a value
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObjectInitArg {
+    Register(usize),
+    Value(Value),
+    RegisterWithFlags(usize, bool, bool, bool), // reg, writable, enumerable, configurable
+    ValueWithFlags(Value, bool, bool, bool),    // value, writable, enumerable, configurable
+}
+#[cfg(test)]
+mod object_init_tests {
+    use super::*;
+    use crate::vm::{Instruction, IonVM};
+    use std::rc::Rc;
+
+    #[test]
+    fn test_object_init_with_registers_and_values() {
+        let mut vm = IonVM::new();
+        vm.set_debug(true);
+        // Prepare a function that uses ObjectInit
+        // r1 = 123, r2 = 456
+        // r0 = { foo: r1, bar: 42, baz: r2 }
+        let func = Rc::new(Function::new_bytecode(
+            Some("obj_init_test".to_string()),
+            0,
+            3,
+            vec![
+                Instruction::LoadConst(1, Value::Primitive(Primitive::Number(123.0))),
+                Instruction::LoadConst(2, Value::Primitive(Primitive::Number(456.0))),
+                Instruction::ObjectInit(
+                    0,
+                    vec![
+                        ("foo".to_string(), ObjectInitArg::RegisterWithFlags(1, true, true, true)),
+                        ("bar".to_string(), ObjectInitArg::ValueWithFlags(Value::Primitive(Primitive::Number(42.0)), true, true, true)),
+                        ("baz".to_string(), ObjectInitArg::RegisterWithFlags(2, true, true, true)),
+                    ],
+                ),
+                Instruction::Return(0),
+            ],
+        ));
+        let pid = vm.spawn_process(func, vec![]);
+        vm.run();
+        let proc = vm.processes.get(&pid).unwrap().borrow();
+        let obj_val = proc.last_result.as_ref().unwrap();
+        if let Value::Object(obj_rc) = obj_val {
+            let obj = obj_rc.borrow();
+            assert_eq!(obj.get_property("foo"), Some(Value::Primitive(Primitive::Number(123.0))));
+            assert_eq!(obj.get_property("bar"), Some(Value::Primitive(Primitive::Number(42.0))));
+            assert_eq!(obj.get_property("baz"), Some(Value::Primitive(Primitive::Number(456.0))));
+        } else {
+            panic!("Expected object in r0");
+        }
+    }
+}
 // Core value and object model types for the prototype-based VM
 
 use std::cell::RefCell;

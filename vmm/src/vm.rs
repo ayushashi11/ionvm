@@ -28,6 +28,8 @@ pub enum ExecutionResult {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
+    /// Create an object with a list of (key, value) pairs, where value can be a register or a constant value
+    ObjectInit(usize, Vec<(String, crate::value::ObjectInitArg)>), // dst, [(key, value/register)]
     LoadConst(usize, Value),             // reg, value
     Move(usize, usize),                  // dst, src
     Add(usize, usize, usize),            // dst, a, b
@@ -159,7 +161,7 @@ impl IonVM {
                     if let Some(frame) = proc.frames.get_mut(timeout.frame_index) {
                         frame.registers[timeout.result_reg] = Value::Primitive(crate::value::Primitive::Boolean(false));
                         if self.debug {
-                            println!("[VM DEBUG] TIMEOUT: Process {} timed out, set result r{} to false (frame_index {})", timeout.pid, timeout.result_reg, timeout.frame_index);
+                            println!("\x1b[36m[VM DEBUG]\x1b[0m TIMEOUT: Process {} timed out, set result r{} to false (frame_index {})", timeout.pid, timeout.result_reg, timeout.frame_index);
                         }
                         //increase ip
                         proc.frames.last_mut().unwrap().ip += 1; // Adjust IP to continue execution
@@ -168,7 +170,7 @@ impl IonVM {
                     proc.status = ProcessStatus::Runnable;
                     self.run_queue.push_back(timeout.pid);
                     if self.debug {
-                        println!("[VM DEBUG] TIMEOUT: Process {} unblocked due to timeout", timeout.pid);
+                        println!("\x1b[36m[VM DEBUG]\x1b[0m TIMEOUT: Process {} unblocked due to timeout", timeout.pid);
                     }
                 }
             }
@@ -285,7 +287,7 @@ impl IonVM {
         self.next_pid += 1;
         
         if self.debug {
-            println!("[VM DEBUG] Spawning process {} with function: {:?}", pid, function.name);
+            println!("\x1b[36m[VM DEBUG]\x1b[0m Spawning process {} with function: {:?}", pid, function.name);
         }
         
         let process = Rc::new(RefCell::new(crate::value::Process::new(
@@ -297,7 +299,7 @@ impl IonVM {
         
         if self.debug {
             if self.debug {
-                println!("[VM DEBUG] Process {} added to run queue. Total processes: {}, Queue length: {}", 
+                println!("\x1b[36m[VM DEBUG]\x1b[0m Process {} added to run queue. Total processes: {}, Queue length: {}", 
                          pid, self.processes.len(), self.run_queue.len());
             }
         }
@@ -350,20 +352,20 @@ impl IonVM {
             self.scheduler_passes += 1;
             
             if self.debug {
-                println!("[VM DEBUG] Scheduler pass {}. Run queue: {:?}", 
+                println!("\x1b[36m[VM DEBUG]\x1b[0m Scheduler pass {}. Run queue: {:?}", 
                          self.scheduler_passes, self.run_queue);
             }
             
             // Get next process to run
             if let Some(pid) = self.run_queue.pop_front() {
                 if self.debug {
-                        println!("[VM DEBUG] Executing process {}", pid);
+                        println!("\x1b[36m[VM DEBUG]\x1b[0m Executing process {}", pid);
                 }
                 if let Some(proc_ref) = self.processes.get(&pid).cloned() {
                     let result = self.execute_process_slice(proc_ref.clone());
                     if self.debug {
                         
-                            println!("[VM DEBUG] Process {} result: {:?}", pid, result);
+                            println!("\x1b[36m[VM DEBUG]\x1b[0m Process {} result: {:?}", pid, result);
                         
                     }
                     self.handle_execution_result(pid, result);
@@ -373,10 +375,10 @@ impl IonVM {
         
         if self.debug {
             if self.debug {
-                println!("[VM DEBUG] Scheduler finished. Final process states:");
+                println!("\x1b[36m[VM DEBUG]\x1b[0m Scheduler finished. Final process states:");
                 for (pid, proc_ref) in &self.processes {
                     let proc = proc_ref.borrow();
-                    println!("[VM DEBUG] Process {}: alive={}, status={:?}, mailbox_size={}", 
+                    println!("\x1b[36m[VM DEBUG]\x1b[0m Process {}: alive={}, status={:?}, mailbox_size={}", 
                              pid, proc.alive, proc.status, proc.mailbox.len());
                 }
             }
@@ -481,14 +483,84 @@ impl IonVM {
     /// Execute a single instruction
     fn execute_instruction(&mut self, proc: &mut crate::value::Process, instruction: Instruction) -> ExecutionResult {
         match instruction {
+            // --- COLOR PALETTE ---
+            // ObjectInit: Orange, LoadConst: Gold, Move: LightSkyBlue, Add: LawnGreen, Sub: Tomato, Mul: Violet, Div: LightSalmon
+            // Return: SlateBlue, GetProp: LightSeaGreen, SetProp: LightCoral
+            // Receive: DodgerBlue, ReceiveWithTimeout: Cyan, Jump: LightPink, JumpIfTrue: MediumSpringGreen, JumpIfFalse: LightYellow
+            // Call: DeepSkyBlue, Yield: LightGray, Spawn: MediumPurple, Send: LightSteelBlue, Link: LightSlateGray
+            // Match: LightGoldenRodYellow, Nop: Gray, Equal: LightGreen, NotEqual: LightPink, LessThan: LightCyan, LessEqual: LightBlue, GreaterThan: LightSalmon, GreaterEqual: LightSkyBlue
+            // And: MediumAquamarine, Or: LightGoldenRodYellow, Not: LightSlateBlue
+
+            Instruction::ObjectInit(dst, kvs) => {
+                if let Some(frame) = proc.frames.last_mut() {
+                    let mut obj = crate::value::Object::new(None);
+                    for (key, arg) in kvs {
+                        use crate::value::ObjectInitArg;
+                        use crate::value::PropertyDescriptor;
+                        match arg {
+                            ObjectInitArg::Register(reg) => {
+                                obj.properties.insert(
+                                    key,
+                                    PropertyDescriptor {
+                                        value: frame.registers[reg].clone(),
+                                        writable: true,
+                                        enumerable: true,
+                                        configurable: true,
+                                    },
+                                );
+                            },
+                            ObjectInitArg::Value(val) => {
+                                obj.properties.insert(
+                                    key,
+                                    PropertyDescriptor {
+                                        value: val.clone(),
+                                        writable: true,
+                                        enumerable: true,
+                                        configurable: true,
+                                    },
+                                );
+                            },
+                            ObjectInitArg::RegisterWithFlags(reg, w, e, c) => {
+                                obj.properties.insert(
+                                    key,
+                                    PropertyDescriptor {
+                                        value: frame.registers[reg].clone(),
+                                        writable: w,
+                                        enumerable: e,
+                                        configurable: c,
+                                    },
+                                );
+                            },
+                            ObjectInitArg::ValueWithFlags(val, w, e, c) => {
+                                obj.properties.insert(
+                                    key,
+                                    PropertyDescriptor {
+                                        value: val.clone(),
+                                        writable: w,
+                                        enumerable: e,
+                                        configurable: c,
+                                    },
+                                );
+                            },
+                        }
+                    }
+                    frame.registers[dst] = Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)));
+                    if self.debug {
+                        // Orange
+                        println!("\x1b[38;2;255;165;0m[VM DEBUG]\x1b[0m OBJECT_INIT: Created object in r{} with properties: {:?}", dst, frame.registers[dst]);
+                    }
+                }
+                ExecutionResult::Continue
+            }
             Instruction::LoadConst(reg, val) => {
                 if let Some(frame) = proc.frames.last_mut() {
                     // Handle special __vm: values
                     let resolved_val = self.resolve_vm_value(val, proc.pid);
                     frame.registers[reg] = resolved_val.clone();
-                    // if( self.debug) {
-                        // println!("[VM DEBUG] LOAD_CONST: Loaded {:?} into r{}", resolved_val, reg);
-                    // }
+                    if self.debug {
+                        // Gold
+                        println!("\x1b[38;2;255;215;0m[VM DEBUG]\x1b[0m LOAD_CONST: Loaded {:?} into r{}", resolved_val, reg);
+                    }
                 }
                 ExecutionResult::Continue
             }
@@ -496,6 +568,10 @@ impl IonVM {
             Instruction::Move(dst, src) => {
                 if let Some(frame) = proc.frames.last_mut() {
                     frame.registers[dst] = frame.registers[src].clone();
+                    if self.debug {
+                        // LightSkyBlue
+                        println!("\x1b[38;2;135;206;250m[VM DEBUG]\x1b[0m MOVE: r{} <- r{} ({:?})", dst, src, frame.registers[dst]);
+                    }
                 }
                 ExecutionResult::Continue
             }
@@ -512,6 +588,10 @@ impl IonVM {
                         _ => {
                             frame.registers[dst] = Value::Primitive(crate::value::Primitive::Undefined);
                         }
+                    }
+                    if self.debug {
+                        // LawnGreen
+                        println!("\x1b[38;2;124;252;0m[VM DEBUG]\x1b[0m ADD: r{} = r{} + r{} -> {:?}", dst, a, b, frame.registers[dst]);
                     }
                 }
                 ExecutionResult::Continue
@@ -530,6 +610,10 @@ impl IonVM {
                             frame.registers[dst] = Value::Primitive(crate::value::Primitive::Undefined);
                         }
                     }
+                    if self.debug {
+                        // Tomato
+                        println!("\x1b[38;2;255;99;71m[VM DEBUG]\x1b[0m SUB: r{} = r{} - r{} -> {:?}", dst, a, b, frame.registers[dst]);
+                    }
                 }
                 ExecutionResult::Continue
             }
@@ -546,6 +630,10 @@ impl IonVM {
                         _ => {
                             frame.registers[dst] = Value::Primitive(crate::value::Primitive::Undefined);
                         }
+                    }
+                    if self.debug {
+                        // Violet
+                        println!("\x1b[38;2;238;130;238m[VM DEBUG]\x1b[0m MUL: r{} = r{} * r{} -> {:?}", dst, a, b, frame.registers[dst]);
                     }
                 }
                 ExecutionResult::Continue
@@ -569,6 +657,10 @@ impl IonVM {
                             frame.registers[dst] = Value::Primitive(crate::value::Primitive::Undefined);
                         }
                     }
+                    if self.debug {
+                        // LightSalmon
+                        println!("\x1b[38;2;255;160;122m[VM DEBUG]\x1b[0m DIV: r{} = r{} / r{} -> {:?}", dst, a, b, frame.registers[dst]);
+                    }
                 }
                 ExecutionResult::Continue
             }
@@ -579,15 +671,16 @@ impl IonVM {
                 } else {
                     Value::Primitive(crate::value::Primitive::Unit)
                 };
-                
                 // Set return value in current frame
                 if let Some(frame) = proc.frames.last_mut() {
                     frame.return_value = Some(return_val.clone());
+                    if self.debug {
+                        // SlateBlue
+                        println!("\x1b[38;2;106;90;205m[VM DEBUG]\x1b[0m RETURN: r{} -> {:?}", reg, return_val);
+                    }
                 }
-                
                 // Check if this is the last frame (main function)
                 let is_main_function = proc.frames.len() == 1;
-                
                 if is_main_function {
                     // This is the main function returning - mark process as completed
                     proc.alive = false;
@@ -597,7 +690,6 @@ impl IonVM {
                     // This is a nested function returning - get caller info then pop frame
                     let caller_return_reg = proc.frames.last().unwrap().caller_return_reg;
                     proc.frames.pop(); // Remove the current frame
-                    
                     // Store return value in caller's register if specified
                     if let (Some(caller_reg), Some(caller_frame)) = (caller_return_reg, proc.frames.last_mut()) {
                         caller_frame.registers[caller_reg] = return_val;
@@ -637,33 +729,28 @@ impl IonVM {
             
             Instruction::Receive(dst) => {
                 if self.debug {
-                    if self.debug {
-                        println!("[VM DEBUG] RECEIVE: Process {} trying to receive into r{}", proc.pid, dst);
-                        println!("[VM DEBUG] RECEIVE: Mailbox size: {}", proc.mailbox.len());
-                    }
+                    // DodgerBlue
+                    println!("\x1b[38;2;30;144;255m[VM DEBUG]\x1b[0m RECEIVE: Process {} trying to receive into r{}", proc.pid, dst);
+                    println!("\x1b[38;2;30;144;255m[VM DEBUG]\x1b[0m RECEIVE: Mailbox size: {}", proc.mailbox.len());
                 }
-                
                 if let Some(msg) = proc.mailbox.pop() {
                     if self.debug {
-                        if self.debug {
-                            println!("[VM DEBUG] RECEIVE: Got message: {:?}", msg);
-                        }
+                        // SpringGreen
+                        println!("\x1b[38;2;0;255;127m[VM DEBUG]\x1b[0m RECEIVE: Got message: {:?}", msg);
                     }
                     if let Some(frame) = proc.frames.last_mut() {
                         frame.registers[dst] = msg;
                         if self.debug {
-                            if self.debug {
-                                println!("[VM DEBUG] RECEIVE: Stored message in r{}", dst);
-                            }
+                            // MediumOrchid
+                            println!("\x1b[38;2;186;85;211m[VM DEBUG]\x1b[0m RECEIVE: Stored message in r{}", dst);
                         }
                     }
                     ExecutionResult::Continue
                 } else {
                     // No message available - block process
                     if self.debug {
-                        if self.debug {
-                            println!("[VM DEBUG] RECEIVE: No message available, blocking");
-                        }
+                        // Crimson
+                        println!("\x1b[38;2;220;20;60m[VM DEBUG]\x1b[0m RECEIVE: No message available, blocking");
                     }
                     ExecutionResult::Blocked
                 }
@@ -671,18 +758,18 @@ impl IonVM {
             
             Instruction::ReceiveWithTimeout(dst, timeout_reg, result_reg) => {
                 if self.debug {
-                    println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: Process {} trying to receive into r{} with timeout from r{}, result to r{}", proc.pid, dst, timeout_reg, result_reg);
-                    println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: Mailbox size: {}", proc.mailbox.len());
+                    println!("\x1b[36m[VM DEBUG]\x1b[0m RECEIVE_WITH_TIMEOUT: Process {} trying to receive into r{} with timeout from r{}, result to r{}", proc.pid, dst, timeout_reg, result_reg);
+                    println!("\x1b[36m[VM DEBUG]\x1b[0m RECEIVE_WITH_TIMEOUT: Mailbox size: {}", proc.mailbox.len());
                 }
                 if let Some(msg) = proc.mailbox.pop() {
                     if self.debug {
-                        println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: Got message: {:?}", msg);
+                        println!("\x1b[36m[VM DEBUG]\x1b[0m RECEIVE_WITH_TIMEOUT: Got message: {:?}", msg);
                     }
                     if let Some(frame) = proc.frames.last_mut() {
                         frame.registers[dst] = msg;
                         frame.registers[result_reg] = Value::Primitive(crate::value::Primitive::Boolean(true));
                         if self.debug {
-                            println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: Stored message in r{}, set result r{} to true", dst, result_reg);
+                            println!("\x1b[36m[VM DEBUG]\x1b[0m RECEIVE_WITH_TIMEOUT: Stored message in r{}, set result r{} to true", dst, result_reg);
                         }
                     }
                     ExecutionResult::Continue
@@ -705,7 +792,7 @@ impl IonVM {
                                 frame_index,
                             });
                             if self.debug {
-                                println!("[VM DEBUG] RECEIVE_WITH_TIMEOUT: No message available, set timeout for {}ms (expires at {}), frame_index {}", timeout_ms, expiry_time, frame_index);
+                                println!("\x1b[36m[VM DEBUG]\x1b[0m RECEIVE_WITH_TIMEOUT: No message available, set timeout for {}ms (expires at {}), frame_index {}", timeout_ms, expiry_time, frame_index);
                             }
                             proc.status = ProcessStatus::WaitingForMessage;
                             ExecutionResult::Blocked
@@ -1447,6 +1534,54 @@ mod tests {
         assert_eq!(result, ExecutionResult::BudgetExhausted);
     }
 
+    fn dummy_function() -> Rc<Function> {
+        Rc::new(Function {
+            name: Some("dummy".to_string()),
+            arity: 0,
+            extra_regs: 0,
+            function_type: crate::value::FunctionType::Bytecode {
+                bytecode: vec![]
+            }
+        })
+    }
+
+    #[test]
+    fn test_match_instruction() {
+        use crate::vm::Instruction;
+        use crate::value::{Function, Primitive, Value};
+        use crate::vm::Pattern;
+        use std::rc::Rc;
+
+        // Function: r0 = 42; match r0 { 42 => jump +2; _ => jump +1 }; r1 = 1; r1 = 2; return r1
+        let func = Rc::new(Function::new_bytecode(
+            Some("match_test".to_string()),
+            0,
+            2,
+            vec![
+                Instruction::LoadConst(0, Value::Primitive(Primitive::Atom("abc".to_string()))),
+                Instruction::Match(
+                    0,
+                    vec![
+                        (Pattern::Value(Value::Primitive(Primitive::Atom("abc".to_string()))), 1),
+                        (Pattern::Wildcard, 3),
+                    ],
+                ),
+                Instruction::LoadConst(1, Value::Primitive(Primitive::Number(2.0))), // skipped if match
+                Instruction::Jump(2), 
+                Instruction::LoadConst(1, Value::Primitive(Primitive::Number(1.0))),
+                Instruction::Return(1),
+            ],
+        ));
+
+        let mut vm = IonVM::new();
+        let pid = vm.spawn_process(func, vec![]);
+        vm.run();
+        let proc = vm.processes.get(&pid).unwrap();
+        assert_eq!(
+            proc.borrow().last_result,
+            Some(Value::Primitive(Primitive::Number(2.0)))
+        );
+    }
     #[test]
     fn test_arithmetic_operations() {
         let mut vm = IonVM::new();

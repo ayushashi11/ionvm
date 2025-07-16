@@ -20,6 +20,17 @@ class Instruction:
         return cls("load_const", reg, value)
     
     @classmethod
+    def object_init(cls, dst: float, kvs: list) -> 'Instruction':
+        """
+        Object initialization with mixed register/value arguments and property flags.
+        kvs: list of (key, arg), where arg is:
+            ('reg', regnum, flags_dict) or ('val', Value, flags_dict)
+        flags_dict: {'writable': bool, 'enumerable': bool, 'configurable': bool} (all default True if omitted)
+        For backward compatibility, ('reg', regnum) or ('val', Value) is allowed (all flags True).
+        """
+        return cls("object_init", dst, kvs)
+    
+    @classmethod
     def move(cls, dst: float, src: float) -> 'Instruction':
         """Move value from src register to dst register."""
         return cls("move", dst, src)
@@ -217,6 +228,7 @@ class Instruction:
             "or": 0x1C,
             "not": 0x1D,
             "receive_with_timeout": 0x1E,
+            "object_init": 0x1F,
         }
         
         if self.opcode not in opcodes:
@@ -225,6 +237,35 @@ class Instruction:
         writer.write_u8(opcodes[self.opcode])
         
         # Serialize arguments based on instruction type
+        if self.opcode == "object_init":
+            dst, kvs = self.args
+            writer.write_u32(dst)
+            writer.write_u32(len(kvs))
+            for key, arg in kvs:
+                writer.write_string(key)
+                # Normalize arg to (kind, value, flags)
+                if len(arg) == 2:
+                    kind, value = arg
+                    flags = {'writeable': True, 'enumerable': True, 'configurable': True}
+                elif len(arg) == 3:
+                    kind, value, flags = arg
+                    # Fill missing flags with True
+                    flags = {k: flags.get(k, True) for k in ['writeable', 'enumerable', 'configurable']}
+                else:
+                    raise ValueError(f"Invalid ObjectInitArg: {arg}")
+                if kind == 'reg':
+                    writer.write_u8(2)
+                    writer.write_u32(value)
+                elif kind == 'val':
+                    writer.write_u8(3)
+                    value.serialize(writer)
+                else:
+                    raise ValueError(f"Invalid ObjectInitArg kind: {kind}")
+                # Write flags (as 3 bytes: 1=on, 0=off)
+                writer.write_u8(1 if flags['writeable'] else 0)
+                writer.write_u8(1 if flags['enumerable'] else 0)
+                writer.write_u8(1 if flags['configurable'] else 0)
+            return
         if self.opcode == "load_const":
             reg, value = self.args
             writer.write_u32(reg)

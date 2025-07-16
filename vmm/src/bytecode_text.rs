@@ -32,6 +32,17 @@ impl std::error::Error for BytecodeTextError {}
 /// Convert an instruction to textual representation
 pub fn instruction_to_text(instr: &Instruction) -> String {
     match instr {
+        Instruction::ObjectInit(dst, kvs) => {
+            let args_str = kvs.iter().map(|(k, v)| {
+                match v {
+                    crate::value::ObjectInitArg::RegisterWithFlags(r, w, e, c) => format!("{}:r{}:{}:{}:{}", k, r, w, e, c),
+                    crate::value::ObjectInitArg::ValueWithFlags(val, w, e, c) => format!("{}:{}:{}:{}:{}", k, value_to_text(val), w, e, c),
+                    crate::value::ObjectInitArg::Register(r) => format!("{}:r{}:true:true:true", k, r),
+                    crate::value::ObjectInitArg::Value(val) => format!("{}:{}:true:true:true", k, value_to_text(val)),
+                }
+            }).collect::<Vec<_>>().join(", ");
+            format!("OBJECT_INIT r{}, {{{}}}", dst, args_str)
+        },
         Instruction::LoadConst(reg, val) => format!("LOAD_CONST r{}, {}", reg, value_to_text(val)),
         Instruction::Move(dst, src) => format!("MOVE r{}, r{}", dst, src),
         Instruction::Add(dst, a, b) => format!("ADD r{}, r{}, r{}", dst, a, b),
@@ -100,9 +111,27 @@ pub fn value_to_text(val: &Value) -> String {
         Value::Primitive(Primitive::Atom(s)) => format!("'{}'", s.replace("'", "\\'")),
         Value::Primitive(Primitive::Unit) => "()".to_string(),
         Value::Primitive(Primitive::Undefined) => "undefined".to_string(),
-        Value::Array(_) => "[Array]".to_string(),
-        Value::Object(_) => "{Object}".to_string(),
-        Value::Tuple(_) => "(Tuple)".to_string(),
+        Value::Array(a) => {
+            let elems_str = a.borrow().iter()
+                .map(value_to_text)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{}]", elems_str)
+        },
+        Value::Object(obj) => {
+            let props_str = obj.borrow().properties.iter()
+                .map(|(k, v)| format!("{}: {}", k, value_to_text(&v.value.clone())))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ {} }}", props_str)
+        },
+        Value::Tuple(tup) => {
+            let elems_str = tup.iter()
+                .map(value_to_text)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({})", elems_str)
+        },
         Value::TaggedEnum(_) => "TaggedEnum".to_string(),
         Value::Function(_) => "Function".to_string(),
         Value::Closure(_) => "Closure".to_string(),
@@ -173,6 +202,32 @@ pub fn bytecode_to_text(bytecode: &[Instruction]) -> String {
 
 /// Parse textual instruction into Instruction enum
 pub fn parse_instruction(line: &str) -> Result<Instruction, BytecodeTextError> {
+    if line.starts_with("OBJECT_INIT") {
+        // Format: OBJECT_INIT rX, {key1:rY, key2:val, ...}
+        let rest = line["OBJECT_INIT".len()..].trim();
+        let mut parts = rest.splitn(2, ',');
+        let reg_part = parts.next().ok_or(BytecodeTextError::InvalidFormat("Missing register in OBJECT_INIT".to_string()))?.trim();
+        let kvs_part = parts.next().ok_or(BytecodeTextError::InvalidFormat("Missing kvs in OBJECT_INIT".to_string()))?.trim();
+        let dst = parse_register(reg_part)?;
+        let kvs_str = kvs_part.trim_start_matches('{').trim_end_matches('}').trim();
+        let mut kvs = Vec::new();
+        if !kvs_str.is_empty() {
+            for pair in kvs_str.split(',') {
+                let pair = pair.trim();
+                let mut kv = pair.splitn(2, ':');
+                let key = kv.next().ok_or(BytecodeTextError::InvalidFormat("Missing key in OBJECT_INIT kv pair".to_string()))?.trim().to_string();
+                let val = kv.next().ok_or(BytecodeTextError::InvalidFormat("Missing value in OBJECT_INIT kv pair".to_string()))?.trim();
+                if val.starts_with('r') {
+                    let reg = parse_register(val)?;
+                    kvs.push((key, crate::value::ObjectInitArg::Register(reg)));
+                } else {
+                    let value = parse_value(val)?;
+                    kvs.push((key, crate::value::ObjectInitArg::Value(value)));
+                }
+            }
+        }
+        return Ok(Instruction::ObjectInit(dst, kvs));
+    }
     let line = line.trim();
     let parts: Vec<&str> = line.split_whitespace().collect();
     

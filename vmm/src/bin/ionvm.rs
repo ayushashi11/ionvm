@@ -104,8 +104,9 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
 
     // Parse debug flag and ionpack path
     let (debug_enabled, ionpack_path, program_args) = parse_run_args(args)?;
-
-    println!("Loading IonPack: {}", ionpack_path);
+    if debug_enabled {
+        println!("Loading IonPack: {}", ionpack_path);
+    }
 
     // Load the IonPack
     let file = File::open(ionpack_path)?;
@@ -113,17 +114,18 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
 
     // Show package info
     let manifest = reader.manifest();
-    println!("Executing {} v{}", manifest.name, manifest.version);
-    if let Some(ref desc) = manifest.description {
-        println!("Description: {}", desc);
+    if debug_enabled {
+        println!("Executing {} v{}", manifest.name, manifest.version);
+        if let Some(ref desc) = manifest.description {
+            println!("Description: {}", desc);
+        }
     }
-
     // Setup FFI libraries
     let temp_dir = std::env::temp_dir().join("ionvm-ffi");
     std::fs::create_dir_all(&temp_dir)?;
     let ffi_libs = reader.setup_ffi_libraries(&temp_dir)?;
     
-    if !ffi_libs.is_empty() {
+    if !ffi_libs.is_empty() && debug_enabled {
         println!("Loaded {} FFI libraries", ffi_libs.len());
     }
 
@@ -131,7 +133,9 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     let main_function = reader.get_main_function()
         .map_err(|e| CliError::ExecutionError(format!("Failed to load main function: {}", e)))?;
     
-    println!("Found main function: {:?}", main_function.name);
+    if debug_enabled {
+        println!("Found main function: {:?}", main_function.name);
+    }
 
     // Create VM and execute
     let mut vm = IonVM::new();
@@ -142,13 +146,17 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         .map(|arg| Value::Primitive(Primitive::Atom(arg.clone())))
         .collect();
 
-    println!("Starting execution...");
-    
+    if debug_enabled {
+        println!("Starting execution...");
+    }
+
     // Execute the main function
     let result = execute_main_function(&mut vm, &main_function, vm_args)?;
-    
-    println!("Execution completed successfully");
-    println!("Result: {:?}", result);
+
+    if debug_enabled {
+        println!("Execution completed successfully");
+        println!("Result: {:?}", result);
+    }
 
     Ok(())
 }
@@ -251,8 +259,9 @@ fn parse_run_args(args: &[String]) -> Result<(bool, &String, &[String]), CliErro
 fn execute_main_function(vm: &mut IonVM, function: &vmm::value::Function, _args: Vec<Value>) -> Result<Value, CliError> {
     match &function.function_type {
         FunctionType::Bytecode { bytecode } => {
-            println!("Executing bytecode function with {} instructions", bytecode.len());
-            
+            if vm.debug {
+                println!("Executing bytecode function with {} instructions", bytecode.len());
+            }
             // For demonstration, we'll create a minimal process and execute
             // In a real implementation, this would use the full VM execution model
             let result = vm.spawn_main_process(function.clone())?;

@@ -78,6 +78,25 @@ def test_instructions():
     for i, instr in enumerate(instructions):
         print(f"  Instruction {i}: {instr}")
     
+    # Test object_init with property flags
+    obj_init_instr = Instruction.object_init(
+        10, [
+            ("foo", ('reg', 1, {'writable': True, 'enumerable': False, 'configurable': True})),
+            ("bar", ('val', Value.number(99), {'writable': False, 'enumerable': True, 'configurable': False})),
+            ("baz", ('val', Value.atom("hello"))),  # No flags: should default to all True
+        ]
+    )
+    print(f"  ObjectInit instruction: {obj_init_instr}")
+    # Check that serialization does not raise and flags are written
+    class DummyWriter:
+        def __init__(self): self.calls = []
+        def write_u8(self, v): self.calls.append(('u8', v))
+        def write_u32(self, v): self.calls.append(('u32', v))
+        def write_string(self, s): self.calls.append(('str', s))
+    dummy = DummyWriter()
+    obj_init_instr.serialize(dummy)
+    print("  ObjectInit serialization calls:", dummy.calls)
+    
     print("✓ Instruction types test passed")
 
 def test_ionpack_creation():

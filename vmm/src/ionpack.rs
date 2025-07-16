@@ -527,12 +527,12 @@ impl<R: Read + Seek> IonPackReader<R> {
         }
         
         let resolv_clone = resolved_functions.clone();
-        for name in resolv_clone.keys() {
-            println!("found: {}", name);
-        }
-        for (name, function) in &mut resolved_functions {
+        // for name in resolv_clone.keys() {
+        //     println!("\x1b[36m[VM DEBUG]\x1b[0m found: {}", name); // Cyan color
+        // }
+        for (_name, function) in &mut resolved_functions {
             // Resolve any references within the function
-            println!("Resolving function references for: {}", name);
+            // println!("\x1b[33m[VM DEBUG]\x1b[0m Resolving function references for: {}", name); // Yellow color
             resolve_function_references(function, &resolv_clone);
         }
         

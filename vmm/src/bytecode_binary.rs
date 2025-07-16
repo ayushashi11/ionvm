@@ -81,6 +81,7 @@ enum Opcode {
     Or = 0x1C,
     Not = 0x1D,
     ReceiveWithTimeout = 0x1E,
+    ObjectInit = 0x1F,
 }
 
 impl TryFrom<u8> for Opcode {
@@ -118,6 +119,7 @@ impl TryFrom<u8> for Opcode {
             0x1C => Ok(Opcode::Or),
             0x1D => Ok(Opcode::Not),
             0x1E => Ok(Opcode::ReceiveWithTimeout),
+            0x1F => Ok(Opcode::ObjectInit),
             _ => Err(BytecodeError::InvalidOpcode(value)),
         }
     }
@@ -313,6 +315,38 @@ impl<W: Write> BinaryWriter<W> {
                 self.write_u32(*dst as u32)?;
                 self.write_u32(*a as u32)?;
                 self.write_u32(*b as u32)?;
+            },
+            Instruction::ObjectInit(dst, kvs) => {
+                self.write_u8(Opcode::ObjectInit as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(kvs.len() as u32)?;
+                for (key, arg) in kvs {
+                    self.write_string(key)?;
+                    match arg {
+                        crate::value::ObjectInitArg::Register(reg) => {
+                            self.write_u8(0)?; // tag for Register
+                            self.write_u32(*reg as u32)?;
+                        },
+                        crate::value::ObjectInitArg::Value(val) => {
+                            self.write_u8(1)?; // tag for Value
+                            self.write_value(val)?;
+                        },
+                        crate::value::ObjectInitArg::RegisterWithFlags(reg, w, e, c) => {
+                            self.write_u8(2)?; // tag for RegisterWithFlags
+                            self.write_u32(*reg as u32)?;
+                            self.write_u8(if *w { 1 } else { 0 })?;
+                            self.write_u8(if *e { 1 } else { 0 })?;
+                            self.write_u8(if *c { 1 } else { 0 })?;
+                        },
+                        crate::value::ObjectInitArg::ValueWithFlags(val, w, e, c) => {
+                            self.write_u8(3)?; // tag for ValueWithFlags
+                            self.write_value(val)?;
+                            self.write_u8(if *w { 1 } else { 0 })?;
+                            self.write_u8(if *e { 1 } else { 0 })?;
+                            self.write_u8(if *c { 1 } else { 0 })?;
+                        }
+                    }
+                }
             },
             Instruction::Return(reg) => {
                 self.write_u8(Opcode::Return as u8)?;
@@ -649,6 +683,42 @@ impl<R: Read> BinaryReader<R> {
                 let a = self.read_u32()? as usize;
                 let b = self.read_u32()? as usize;
                 Ok(Instruction::Div(dst, a, b))
+            },
+            Opcode::ObjectInit => {
+                let dst = self.read_u32()? as usize;
+                let count = self.read_u32()? as usize;
+                let mut kvs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let key = self.read_string()?;
+                    let tag = self.read_u8()?;
+                    let arg = match tag {
+                        0 => {
+                            let reg = self.read_u32()? as usize;
+                            crate::value::ObjectInitArg::Register(reg)
+                        },
+                        1 => {
+                            let val = self.read_value()?;
+                            crate::value::ObjectInitArg::Value(val)
+                        },
+                        2 => {
+                            let reg = self.read_u32()? as usize;
+                            let w = self.read_u8()? != 0;
+                            let e = self.read_u8()? != 0;
+                            let c = self.read_u8()? != 0;
+                            crate::value::ObjectInitArg::RegisterWithFlags(reg, w, e, c)
+                        },
+                        3 => {
+                            let val = self.read_value()?;
+                            let w = self.read_u8()? != 0;
+                            let e = self.read_u8()? != 0;
+                            let c = self.read_u8()? != 0;
+                            crate::value::ObjectInitArg::ValueWithFlags(val, w, e, c)
+                        },
+                        _ => return Err(BytecodeError::InvalidFormat("Invalid ObjectInitArg tag".to_string())),
+                    };
+                    kvs.push((key, arg));
+                }
+                Ok(Instruction::ObjectInit(dst, kvs))
             },
             Opcode::Return => {
                 let reg = self.read_u32()? as usize;
@@ -1250,6 +1320,48 @@ mod tests {
         assert!(matches!(deserialized[1], Instruction::LoadConst(1, _)));
         assert!(matches!(deserialized[2], Instruction::Add(2, 0, 1)));
         assert!(matches!(deserialized[3], Instruction::Return(2)));
+    }
+
+    #[test]
+    fn test_objectinit_bytecode_roundtrip() {
+        use crate::value::{ObjectInitArg};
+        // Test with all flag combinations for both Register and Value
+        let kvs = vec![
+            ("foo".to_string(), ObjectInitArg::RegisterWithFlags(1, true, false, true)),
+            ("bar".to_string(), ObjectInitArg::ValueWithFlags(Value::Primitive(Primitive::Number(99.0)), false, true, false)),
+        ];
+        let instr = Instruction::ObjectInit(0, kvs.clone());
+        let mut buffer = Vec::new();
+        serialize_bytecode(&[instr.clone()], &mut buffer).unwrap();
+        let cursor = Cursor::new(buffer);
+        let deserialized = deserialize_bytecode(cursor).unwrap();
+        assert_eq!(deserialized.len(), 1);
+        if let Instruction::ObjectInit(dst, out_kvs) = &deserialized[0] {
+            assert_eq!(*dst, 0);
+            assert_eq!(out_kvs.len(), 2);
+            match &out_kvs[0] {
+                (k, ObjectInitArg::RegisterWithFlags(reg, w, e, c)) => {
+                    assert_eq!(k, "foo");
+                    assert_eq!(*reg, 1);
+                    assert_eq!(*w, true);
+                    assert_eq!(*e, false);
+                    assert_eq!(*c, true);
+                },
+                _ => panic!("Expected RegisterWithFlags variant")
+            }
+            match &out_kvs[1] {
+                (k, ObjectInitArg::ValueWithFlags(val, w, e, c)) => {
+                    assert_eq!(k, "bar");
+                    assert!(matches!(val, Value::Primitive(Primitive::Number(n)) if (*n - 99.0).abs() < 1e-8));
+                    assert_eq!(*w, false);
+                    assert_eq!(*e, true);
+                    assert_eq!(*c, false);
+                },
+                _ => panic!("Expected ValueWithFlags variant")
+            }
+        } else {
+            panic!("Expected ObjectInit instruction");
+        }
     }
 
     #[test]
