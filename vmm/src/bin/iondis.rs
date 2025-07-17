@@ -4,9 +4,9 @@ use std::env;
 use std::fs::File;
 use std::process;
 
-use vmm::ionpack::{IonPackReader, IonPackError};
-use vmm::bytecode_text::function_to_text;
 use vmm::bytecode_binary::deserialize_function;
+use vmm::bytecode_text::function_to_text;
+use vmm::ionpack::{IonPackError, IonPackReader};
 
 /// CLI error types
 #[derive(Debug)]
@@ -48,7 +48,7 @@ impl std::fmt::Display for DisError {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() < 2 {
         print_usage();
         process::exit(1);
@@ -58,25 +58,25 @@ fn main() {
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
-        },
+        }
         _ => {
             // Parse file and optional class name
             let file_path = &args[1];
             let class_name = args.get(2);
-            
+
             if file_path.ends_with(".ionpack") {
                 disassemble_ionpack(file_path, class_name)
             } else if file_path.ends_with(".ionc") {
                 if class_name.is_some() {
                     Err(DisError::InvalidArgs(
-                        "Class name not needed for .ionc files".to_string()
+                        "Class name not needed for .ionc files".to_string(),
                     ))
                 } else {
                     disassemble_ionc(file_path)
                 }
             } else {
                 Err(DisError::InvalidArgs(
-                    "File must be .ionpack or .ionc".to_string()
+                    "File must be .ionpack or .ionc".to_string(),
                 ))
             }
         }
@@ -109,7 +109,10 @@ fn disassemble_ionpack(file_path: &str, class_name: Option<&String>) -> Result<(
         DisError::InvalidArgs("Class name required for .ionpack files".to_string())
     })?;
 
-    println!("Disassembling class '{}' from IonPack: {}", class_name, file_path);
+    println!(
+        "Disassembling class '{}' from IonPack: {}",
+        class_name, file_path
+    );
     println!();
 
     // Load the IonPack
@@ -118,12 +121,12 @@ fn disassemble_ionpack(file_path: &str, class_name: Option<&String>) -> Result<(
 
     // Load all functions from the specified class (supports multi-function format)
     let functions = reader.load_functions(class_name)?;
-    
+
     if functions.is_empty() {
         println!("No functions found in class '{}'", class_name);
         return Ok(());
     }
-    
+
     // Convert each function to text format
     for (i, function) in functions.iter().enumerate() {
         if i > 0 {
@@ -143,7 +146,7 @@ fn disassemble_ionc(file_path: &str) -> Result<(), DisError> {
     // Read the bytecode file
     let mut file = File::open(file_path)?;
     let function = deserialize_function(&mut file)?;
-    
+
     // Convert to text format
     let text = function_to_text(&function);
     println!("{}", text);

@@ -1,12 +1,12 @@
 //! Math functions for the standard library
 
-use crate::{FfiFunction, FfiValue, FfiResult, FfiError, FfiRegistry};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
 
 /// Macro to create math FFI functions with automatic argument checking
 macro_rules! math_function {
     ($name:ident, $arity:expr, $description:expr, |$args:ident| $body:expr) => {
         pub struct $name;
-        
+
         impl FfiFunction for $name {
             fn call(&self, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() != $arity {
@@ -17,15 +17,15 @@ macro_rules! math_function {
                 }
                 $body
             }
-            
+
             fn name(&self) -> &str {
                 stringify!($name)
             }
-            
+
             fn arity(&self) -> usize {
                 $arity
             }
-            
+
             fn description(&self) -> Option<&str> {
                 Some($description)
             }
@@ -38,7 +38,9 @@ math_function!(Sqrt, 1, "Square root of a number", |args| {
     match &args[0] {
         FfiValue::Number(n) => {
             if *n < 0.0 {
-                Err(FfiError::RuntimeError("Cannot take square root of negative number".to_string()))
+                Err(FfiError::RuntimeError(
+                    "Cannot take square root of negative number".to_string(),
+                ))
             } else {
                 Ok(FfiValue::Number(n.sqrt()))
             }

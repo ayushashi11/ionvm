@@ -29,9 +29,23 @@ mod object_init_tests {
                 Instruction::ObjectInit(
                     0,
                     vec![
-                        ("foo".to_string(), ObjectInitArg::RegisterWithFlags(1, true, true, true)),
-                        ("bar".to_string(), ObjectInitArg::ValueWithFlags(Value::Primitive(Primitive::Number(42.0)), true, true, true)),
-                        ("baz".to_string(), ObjectInitArg::RegisterWithFlags(2, true, true, true)),
+                        (
+                            "foo".to_string(),
+                            ObjectInitArg::RegisterWithFlags(1, true, true, true),
+                        ),
+                        (
+                            "bar".to_string(),
+                            ObjectInitArg::ValueWithFlags(
+                                Value::Primitive(Primitive::Number(42.0)),
+                                true,
+                                true,
+                                true,
+                            ),
+                        ),
+                        (
+                            "baz".to_string(),
+                            ObjectInitArg::RegisterWithFlags(2, true, true, true),
+                        ),
                     ],
                 ),
                 Instruction::Return(0),
@@ -43,9 +57,18 @@ mod object_init_tests {
         let obj_val = proc.last_result.as_ref().unwrap();
         if let Value::Object(obj_rc) = obj_val {
             let obj = obj_rc.borrow();
-            assert_eq!(obj.get_property("foo"), Some(Value::Primitive(Primitive::Number(123.0))));
-            assert_eq!(obj.get_property("bar"), Some(Value::Primitive(Primitive::Number(42.0))));
-            assert_eq!(obj.get_property("baz"), Some(Value::Primitive(Primitive::Number(456.0))));
+            assert_eq!(
+                obj.get_property("foo"),
+                Some(Value::Primitive(Primitive::Number(123.0)))
+            );
+            assert_eq!(
+                obj.get_property("bar"),
+                Some(Value::Primitive(Primitive::Number(42.0)))
+            );
+            assert_eq!(
+                obj.get_property("baz"),
+                Some(Value::Primitive(Primitive::Number(456.0)))
+            );
         } else {
             panic!("Expected object in r0");
         }
@@ -63,8 +86,8 @@ pub type Atom = String; // Atoms are interned strings in some languages; here, j
 pub enum Primitive {
     Number(f64),
     Boolean(bool),
-    String(String),  // Mutable strings for text manipulation
-    Atom(Atom),      // Immutable interned symbols for identifiers
+    String(String), // Mutable strings for text manipulation
+    Atom(Atom),     // Immutable interned symbols for identifiers
     Unit,
     Undefined,
 }
@@ -187,32 +210,49 @@ pub struct Function {
     pub extra_regs: usize, // Additional registers beyond arity for calculations
     pub function_type: FunctionType,
     // More metadata as needed
+    pub bound_this: Option<Value>, // For methods bound to an object
 }
 
 impl Function {
     /// Create a new bytecode function
-    pub fn new_bytecode(name: Option<String>, arity: usize, extra_regs: usize, bytecode: Vec<crate::vm::Instruction>) -> Self {
+    pub fn new_bytecode(
+        name: Option<String>,
+        arity: usize,
+        extra_regs: usize,
+        bytecode: Vec<crate::vm::Instruction>,
+    ) -> Self {
         Function {
             name,
             arity,
             extra_regs,
             function_type: FunctionType::Bytecode { bytecode },
+            bound_this: None,
         }
     }
-    
+
     /// Create a new FFI function
     pub fn new_ffi(name: Option<String>, arity: usize, function_name: String) -> Self {
         Function {
             name,
             arity,
-            extra_regs: 0, // FFI functions don't need extra registers 
+            extra_regs: 0, // FFI functions don't need extra registers
             function_type: FunctionType::Ffi { function_name },
+            bound_this: None,
         }
     }
-    
+
     /// Get total number of registers needed (arity + extra_regs)
     pub fn total_registers(&self) -> usize {
         self.arity + self.extra_regs
+    }
+
+    pub fn set_bound_this(&mut self, this: Value) -> bool {
+        if self.bound_this.is_none() {
+            self.bound_this = Some(this);
+            true
+        } else {
+            false // Already bound
+        }
     }
 }
 
@@ -373,7 +413,7 @@ mod tests {
             Some("id".to_string()),
             1,
             0, // No extra registers needed for simple return
-            vec![Instruction::Return(0)]
+            vec![Instruction::Return(0)],
         ));
         let mut registers = vec![Value::Primitive(Primitive::Number(42.0))];
         registers.resize(16, Value::Primitive(Primitive::Undefined));
@@ -396,12 +436,12 @@ mod tests {
 #[cfg(test)]
 mod extra_regs_tests {
     use super::*;
-    use crate::vm::{IonVM, Instruction, ExecutionResult};
-    
+    use crate::vm::{Instruction, IonVM};
+
     #[test]
     fn test_vm_with_extra_regs_function() {
         let mut vm = IonVM::new();
-        
+
         // Create a function that uses extra registers for complex calculations
         // Function takes 2 arguments and uses 4 extra registers
         let complex_func = Function::new_bytecode(
@@ -410,38 +450,38 @@ mod extra_regs_tests {
             4, // Extra registers: r2, r3, r4, r5
             vec![
                 // Complex calculation: ((a + b) * 2) + ((a - b) * 3)
-                Instruction::Add(2, 0, 1),           // r2 = a + b
-                Instruction::Sub(3, 0, 1),           // r3 = a - b
+                Instruction::Add(2, 0, 1), // r2 = a + b
+                Instruction::Sub(3, 0, 1), // r3 = a - b
                 Instruction::LoadConst(4, Value::Primitive(Primitive::Number(2.0))), // r4 = 2
                 Instruction::LoadConst(5, Value::Primitive(Primitive::Number(3.0))), // r5 = 3
-                Instruction::Mul(2, 2, 4),           // r2 = (a + b) * 2
-                Instruction::Mul(3, 3, 5),           // r3 = (a - b) * 3
-                Instruction::Add(0, 2, 3),           // r0 = result (reuse r0 for return)
+                Instruction::Mul(2, 2, 4), // r2 = (a + b) * 2
+                Instruction::Mul(3, 3, 5), // r3 = (a - b) * 3
+                Instruction::Add(0, 2, 3), // r0 = result (reuse r0 for return)
                 Instruction::Return(0),
-            ]
+            ],
         );
-        
+
         // Test that function reports correct register requirements
         assert_eq!(complex_func.total_registers(), 6); // 2 args + 4 extra = 6 total
-        
+
         // Spawn process with the function
         let args = vec![
             Value::Primitive(Primitive::Number(10.0)), // a = 10
             Value::Primitive(Primitive::Number(3.0)),  // b = 3
         ];
-        
+
         let pid = vm.spawn_process(Rc::new(complex_func), args);
-        
+
         // Run the VM until completion
         vm.run();
-        
+
         // Verify the process allocated the correct number of registers
         if let Some(process_rc) = vm.processes.get(&pid) {
             let process = process_rc.borrow();
             if let Some(frame) = process.frames.first() {
                 // Frame should have at least 6 registers (may have more for compatibility)
                 assert!(frame.registers.len() >= 6);
-                
+
                 // Check that the computation was done correctly
                 // Expected: ((10 + 3) * 2) + ((10 - 3) * 3) = (13 * 2) + (7 * 3) = 26 + 21 = 47
                 if let Some(result) = &process.last_result {
@@ -451,10 +491,10 @@ mod extra_regs_tests {
         }
     }
 
-    #[test] 
+    #[test]
     fn test_minimal_register_allocation() {
         let mut vm = IonVM::new();
-        
+
         // Function with no arguments and no extra registers - should still get minimum 16 for compatibility
         let minimal_func = Function::new_bytecode(
             Some("minimal".to_string()),
@@ -463,13 +503,13 @@ mod extra_regs_tests {
             vec![
                 Instruction::LoadConst(0, Value::Primitive(Primitive::Number(42.0))),
                 Instruction::Return(0),
-            ]
+            ],
         );
-        
+
         assert_eq!(minimal_func.total_registers(), 0);
-        
+
         let pid = vm.spawn_process(Rc::new(minimal_func), vec![]);
-        
+
         // Verify minimum register allocation
         if let Some(process_rc) = vm.processes.get(&pid) {
             let process = process_rc.borrow();

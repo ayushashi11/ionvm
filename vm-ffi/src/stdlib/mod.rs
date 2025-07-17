@@ -1,10 +1,10 @@
 //! Modular standard library for the VM FFI
-//! 
+//!
 //! This module organizes standard library functions into logical groups
 //! for better maintainability and optional inclusion.
 
-pub mod math;
 pub mod io;
+pub mod math;
 pub mod string;
 
 use crate::FfiRegistry;
@@ -56,12 +56,12 @@ mod tests {
     fn test_register_all() {
         let mut registry = FfiRegistry::new();
         register_all(&mut registry);
-        
+
         // Check that functions from all modules are registered
         assert!(registry.get_function_info("Sqrt").is_some()); // math
         assert!(registry.get_function_info("Print").is_some()); // io
         assert!(registry.get_function_info("StrLength").is_some()); // string
-        
+
         let functions = registry.list_functions();
         assert!(functions.len() > 10); // Should have many functions
     }
@@ -70,7 +70,7 @@ mod tests {
     fn test_register_selective() {
         let mut registry = FfiRegistry::new();
         register_math_only(&mut registry);
-        
+
         // Should have math functions but not I/O or string
         assert!(registry.get_function_info("Sqrt").is_some());
         assert!(registry.get_function_info("Print").is_none());
@@ -81,7 +81,7 @@ mod tests {
     fn test_register_modules() {
         let mut registry = FfiRegistry::new();
         register_modules(&mut registry, &["math"]);
-        
+
         assert!(registry.get_function_info("Sqrt").is_some());
         assert!(registry.get_function_info("Print").is_none());
         assert!(registry.get_function_info("StrLength").is_none());

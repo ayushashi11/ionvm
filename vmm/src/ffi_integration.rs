@@ -1,10 +1,13 @@
 //! FFI Integration for the VM
-//! 
+//!
 //! This module provides the bridge between the VM and the vm-ffi library,
 //! allowing the VM to call external Rust and Python functions.
 
-use crate::value::{Value, Primitive};
-use vm_ffi::{FfiValue, FfiError, FfiRegistry, bridge::{ToFfiValue, FromFfiValue}};
+use crate::value::{Primitive, Value};
+use vm_ffi::{
+    FfiError, FfiRegistry, FfiValue,
+    bridge::{FromFfiValue, ToFfiValue},
+};
 
 /// Implement conversion from VM Value to FFI Value
 impl ToFfiValue for Value {
@@ -12,11 +15,13 @@ impl ToFfiValue for Value {
         match self {
             Value::Primitive(Primitive::Number(n)) => FfiValue::Number(*n),
             Value::Primitive(Primitive::Boolean(b)) => FfiValue::Boolean(*b),
-            Value::Primitive(Primitive::String(s)) => FfiValue::String(format!("\"{}\"",s.clone())),
+            Value::Primitive(Primitive::String(s)) => {
+                FfiValue::String(format!("\"{}\"", s.clone()))
+            }
             Value::Primitive(Primitive::Atom(s)) => FfiValue::String(s.clone()),
             Value::Primitive(Primitive::Unit) => FfiValue::Unit,
             Value::Primitive(Primitive::Undefined) => FfiValue::Undefined,
-            
+
             // For complex types, we could serialize them or provide references
             // For now, we'll convert them to strings
             Value::Tuple(arr) => {
@@ -24,18 +29,18 @@ impl ToFfiValue for Value {
                 let arr_borrow = arr.clone();
                 let ffi_values: Vec<FfiValue> = arr_borrow.iter().map(|v| v.to_ffi()).collect();
                 FfiValue::Tuple(ffi_values)
-            },
+            }
             Value::Array(arr) => {
                 // Convert array elements
                 let arr_borrow = arr.borrow();
                 let ffi_values: Vec<FfiValue> = arr_borrow.iter().map(|v| v.to_ffi()).collect();
                 FfiValue::Array(ffi_values)
-            },
-            Value::Object( obj) => {
+            }
+            Value::Object(obj) => {
                 // Convert object properties to FFI values
-                use crate::value::{Object, PropertyDescriptor};
-                use std::cell::RefCell;
-                use std::rc::Rc;
+                // use crate::value::{Object, PropertyDescriptor};
+                // use std::cell::RefCell;
+                // use std::rc::Rc;
 
                 let obj_borrow = obj.borrow();
                 let mut ffi_obj = std::collections::HashMap::new();
@@ -43,7 +48,7 @@ impl ToFfiValue for Value {
                     ffi_obj.insert(key.clone(), desc.value.to_ffi());
                 }
                 FfiValue::Object(ffi_obj)
-            },
+            }
             Value::TaggedEnum(_) => FfiValue::String("[TaggedEnum]".to_string()),
             Value::Function(_) => FfiValue::String("[Function]".to_string()),
             Value::Closure(_) => FfiValue::String("[Closure]".to_string()),
@@ -64,42 +69,45 @@ impl FromFfiValue for Value {
             FfiValue::Tuple(arr) => {
                 // Convert FFI tuple to VM tuples
                 use std::rc::Rc;
-                
+
                 let mut vm_values = Vec::new();
                 for ffi_val in arr {
                     vm_values.push(Value::from_ffi(ffi_val)?);
                 }
                 Ok(Value::Tuple(Rc::new(vm_values)))
-            },
+            }
             FfiValue::Array(arr) => {
                 use std::cell::RefCell;
                 use std::rc::Rc;
-                
+
                 let mut vm_values = Vec::new();
                 for ffi_val in arr {
                     vm_values.push(Value::from_ffi(ffi_val)?);
                 }
                 Ok(Value::Array(Rc::new(RefCell::new(vm_values))))
-            },
-            
+            }
+
             FfiValue::Object(obj) => {
                 // Convert FFI object to VM object
                 use crate::value::{Object, PropertyDescriptor};
                 use std::cell::RefCell;
                 use std::rc::Rc;
-                
+
                 let mut vm_obj = Object::new(None);
                 for (key, ffi_val) in obj {
                     let vm_val = Value::from_ffi(ffi_val)?;
-                    vm_obj.properties.insert(key, PropertyDescriptor {
-                        value: vm_val,
-                        writable: true,
-                        enumerable: true,
-                        configurable: true,
-                    });
+                    vm_obj.properties.insert(
+                        key,
+                        PropertyDescriptor {
+                            value: vm_val,
+                            writable: true,
+                            enumerable: true,
+                            configurable: true,
+                        },
+                    );
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(vm_obj))))
-            },
+            }
         }
     }
 }
@@ -119,7 +127,7 @@ pub fn call_ffi_function(
 ) -> FfiCallResult {
     // Convert VM values to FFI values
     let ffi_args: Vec<FfiValue> = args.iter().map(|v| v.to_ffi()).collect();
-    
+
     // Call the FFI function
     match registry.call(function_name, ffi_args) {
         Ok(ffi_result) => {
@@ -182,13 +190,11 @@ mod tests {
     #[test]
     fn test_ffi_function_call() {
         let registry = FfiRegistry::with_stdlib();
-        
-        let args = vec![
-            Value::Primitive(Primitive::Number(16.0))
-        ];
-        
+
+        let args = vec![Value::Primitive(Primitive::Number(16.0))];
+
         let result = call_ffi_function(&registry, "Sqrt", args);
-        
+
         match result {
             FfiCallResult::Success(Value::Primitive(Primitive::Number(n))) => {
                 assert_eq!(n, 4.0);
@@ -200,13 +206,13 @@ mod tests {
     #[test]
     fn test_ffi_function_call_error() {
         let registry = FfiRegistry::with_stdlib();
-        
-        let args = vec![
-            Value::Primitive(Primitive::Atom("not a number".to_string()))
-        ];
-        
+
+        let args = vec![Value::Primitive(Primitive::Atom(
+            "not a number".to_string(),
+        ))];
+
         let result = call_ffi_function(&registry, "Sqrt", args);
-        
+
         match result {
             FfiCallResult::Error(_) => {
                 // Expected error due to wrong argument type
@@ -218,13 +224,11 @@ mod tests {
     #[test]
     fn test_string_functions() {
         let registry = FfiRegistry::with_stdlib();
-        
-        let args = vec![
-            Value::Primitive(Primitive::Atom("hello world".to_string()))
-        ];
-        
+
+        let args = vec![Value::Primitive(Primitive::Atom("hello world".to_string()))];
+
         let result = call_ffi_function(&registry, "StrLength", args);
-        
+
         match result {
             FfiCallResult::Success(Value::Primitive(Primitive::Number(n))) => {
                 assert_eq!(n, 11.0);

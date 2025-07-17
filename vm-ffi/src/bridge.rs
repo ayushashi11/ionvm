@@ -1,9 +1,9 @@
 //! Bridge between VM and FFI value systems
-//! 
+//!
 //! This module provides conversion functions between the VM's value types
 //! and the FFI's value types to enable seamless integration.
 
-use crate::{FfiValue, FfiError, FfiResult};
+use crate::{FfiError, FfiResult, FfiValue};
 
 /// Convert from VM Value to FFI Value
 pub trait ToFfiValue {
@@ -72,7 +72,7 @@ mod tests {
     fn test_vm_values_to_ffi_array() {
         let vm_values = vec![MockVmValue(1), MockVmValue(2), MockVmValue(3)];
         let ffi_array = vm_values_to_ffi_array(vm_values);
-        
+
         match ffi_array {
             FfiValue::Array(arr) => {
                 assert_eq!(arr.len(), 3);
@@ -91,7 +91,7 @@ mod tests {
             FfiValue::Number(2.0),
             FfiValue::Number(3.0),
         ]);
-        
+
         let vm_values: Vec<MockVmValue> = ffi_array_to_vm_values(ffi_array).unwrap();
         assert_eq!(vm_values.len(), 3);
         assert_eq!(vm_values[0], MockVmValue(1));
@@ -101,7 +101,8 @@ mod tests {
 
     #[test]
     fn test_ffi_array_conversion_error() {
-        let result: Result<Vec<MockVmValue>, _> = ffi_array_to_vm_values(FfiValue::String("not an array".to_string()));
+        let result: Result<Vec<MockVmValue>, _> =
+            ffi_array_to_vm_values(FfiValue::String("not an array".to_string()));
         assert!(matches!(result, Err(FfiError::ArgumentType { .. })));
     }
 }

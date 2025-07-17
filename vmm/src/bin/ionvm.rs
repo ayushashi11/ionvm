@@ -6,9 +6,9 @@ use std::fs::File;
 use std::process;
 
 use vm_ffi::stdlib;
-use vmm::ionpack::{IonPackReader, IonPackError};
+use vmm::ionpack::{IonPackError, IonPackReader};
+use vmm::value::{FunctionType, Primitive, Value};
 use vmm::vm::IonVM;
-use vmm::value::{Value, Primitive, FunctionType};
 //get all stdlib functions
 
 /// CLI error types
@@ -51,7 +51,7 @@ impl std::fmt::Display for CliError {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() < 2 {
         print_usage();
         process::exit(1);
@@ -63,7 +63,7 @@ fn main() {
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
-        },
+        }
         _ => {
             eprintln!("Unknown command: {}", args[1]);
             print_usage();
@@ -124,15 +124,16 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     let temp_dir = std::env::temp_dir().join("ionvm-ffi");
     std::fs::create_dir_all(&temp_dir)?;
     let ffi_libs = reader.setup_ffi_libraries(&temp_dir)?;
-    
+
     if !ffi_libs.is_empty() && debug_enabled {
         println!("Loaded {} FFI libraries", ffi_libs.len());
     }
 
     // Get main function directly from the main class
-    let main_function = reader.get_main_function()
+    let main_function = reader
+        .get_main_function()
         .map_err(|e| CliError::ExecutionError(format!("Failed to load main function: {}", e)))?;
-    
+
     if debug_enabled {
         println!("Found main function: {:?}", main_function.name);
     }
@@ -140,9 +141,10 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     // Create VM and execute
     let mut vm = IonVM::new();
     vm.set_debug(debug_enabled);
-    
+
     // Convert program arguments to IonVM values
-    let vm_args: Vec<Value> = program_args.iter()
+    let vm_args: Vec<Value> = program_args
+        .iter()
         .map(|arg| Value::Primitive(Primitive::Atom(arg.clone())))
         .collect();
 
@@ -167,7 +169,7 @@ fn cmd_info(args: &[String]) -> Result<(), CliError> {
     }
 
     let ionpack_path = &args[0];
-    
+
     // Load the IonPack
     let file = File::open(ionpack_path)?;
     let mut reader = IonPackReader::new(file)?;
@@ -179,11 +181,11 @@ fn cmd_info(args: &[String]) -> Result<(), CliError> {
     println!("Name: {}", manifest.name);
     println!("Version: {}", manifest.version);
     println!("IonPack Version: {}", manifest.ionpack_version);
-    
+
     if let Some(ref main_class) = manifest.main_class {
         println!("Main Class: {}", main_class);
     }
-    
+
     if let Some(ref entry_point) = manifest.entry_point {
         println!("Entry Point: {}", entry_point);
     }
@@ -191,7 +193,7 @@ fn cmd_info(args: &[String]) -> Result<(), CliError> {
     if let Some(ref description) = manifest.description {
         println!("Description: {}", description);
     }
-    
+
     if let Some(ref author) = manifest.author {
         println!("Author: {}", author);
     }
@@ -236,42 +238,50 @@ fn cmd_info(args: &[String]) -> Result<(), CliError> {
 fn parse_run_args(args: &[String]) -> Result<(bool, &String, &[String]), CliError> {
     let mut debug_enabled = false;
     let mut ionpack_index = 0;
-    
+
     // Check for debug flag at the beginning
     if !args.is_empty() && (args[0] == "--debug" || args[0] == "-d") {
         debug_enabled = true;
         ionpack_index = 1;
     }
-    
+
     // Ensure we have an ionpack file after potential debug flag
     if ionpack_index >= args.len() {
         return Err(CliError::InvalidArgs("Missing IonPack file".to_string()));
     }
-    
+
     let ionpack_path = &args[ionpack_index];
     let program_args = &args[ionpack_index + 1..];
-    
+
     Ok((debug_enabled, ionpack_path, program_args))
 }
 
 /// Execute the main function in a VM context
 /// This is a simplified version for demonstration
-fn execute_main_function(vm: &mut IonVM, function: &vmm::value::Function, _args: Vec<Value>) -> Result<Value, CliError> {
+fn execute_main_function(
+    vm: &mut IonVM,
+    function: &vmm::value::Function,
+    _args: Vec<Value>,
+) -> Result<Value, CliError> {
     match &function.function_type {
         FunctionType::Bytecode { bytecode } => {
             if vm.debug {
-                println!("Executing bytecode function with {} instructions", bytecode.len());
+                println!(
+                    "Executing bytecode function with {} instructions",
+                    bytecode.len()
+                );
             }
             // For demonstration, we'll create a minimal process and execute
             // In a real implementation, this would use the full VM execution model
             let result = vm.spawn_main_process(function.clone())?;
-            
+
             Ok(result)
-        },
+        }
         FunctionType::Ffi { function_name } => {
-            return Err(CliError::ExecutionError(
-                format!("FFI main functions not yet supported: {}", function_name)
-            ));
+            return Err(CliError::ExecutionError(format!(
+                "FFI main functions not yet supported: {}",
+                function_name
+            )));
         }
     }
 }

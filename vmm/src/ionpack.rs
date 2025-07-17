@@ -1,5 +1,5 @@
 //! IonPack format - ZIP-based container for IonVM modules
-//! 
+//!
 //! IonPack files (.ionpack) are ZIP archives with a specific structure:
 //! - META-INF/MANIFEST.ion - Package metadata
 //! - classes/ - Compiled IonVM bytecode files (.ionc)
@@ -7,15 +7,18 @@
 //! - resources/ - Static resources
 //! - src/ - Optional source files
 
-use crate::bytecode_binary::{serialize_function, serialize_functions, deserialize_functions_auto, resolve_function_references, BytecodeError};
+use crate::bytecode_binary::{
+    BytecodeError, deserialize_functions_auto, resolve_function_references, serialize_function,
+    serialize_functions,
+};
 use crate::value::Function;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Read, Write, Seek};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use zip::{ZipWriter, ZipArchive, write::FileOptions, CompressionMethod};
+use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
 /// Magic identifier for IonPack files
 pub const IONPACK_MAGIC: &str = "ionpack";
@@ -116,52 +119,55 @@ impl Manifest {
         result.push_str(&format!("IonPack-Version: {}\n", self.ionpack_version));
         result.push_str(&format!("Name: {}\n", self.name));
         result.push_str(&format!("Version: {}\n", self.version));
-        
+
         if let Some(ref main) = self.main_class {
             result.push_str(&format!("Main-Class: {}\n", main));
         }
-        
+
         if let Some(ref entry) = self.entry_point {
             result.push_str(&format!("Entry-Point: {}\n", entry));
         }
-        
+
         if let Some(ref desc) = self.description {
             result.push_str(&format!("Description: {}\n", desc));
         }
-        
+
         if let Some(ref author) = self.author {
             result.push_str(&format!("Author: {}\n", author));
         }
-        
+
         if !self.dependencies.is_empty() {
             result.push_str(&format!("Dependencies: {}\n", self.dependencies.join(", ")));
         }
-        
+
         if !self.ffi_libraries.is_empty() {
-            result.push_str(&format!("FFI-Libraries: {}\n", self.ffi_libraries.join(", ")));
+            result.push_str(&format!(
+                "FFI-Libraries: {}\n",
+                self.ffi_libraries.join(", ")
+            ));
         }
-        
+
         if !self.exports.is_empty() {
             result.push_str(&format!("Exports: {}\n", self.exports.join(", ")));
         }
-        
+
         result
     }
 
     /// Parse manifest from MANIFEST.ion format
     pub fn from_string(content: &str) -> Result<Self, IonPackError> {
         let mut manifest = Manifest::new("unnamed".to_string(), "1.0".to_string());
-        
+
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            
+
             if let Some((key, value)) = line.split_once(':') {
                 let key = key.trim();
                 let value = value.trim();
-                
+
                 match key {
                     "IonPack-Version" => manifest.ionpack_version = value.to_string(),
                     "Name" => manifest.name = value.to_string(),
@@ -171,32 +177,36 @@ impl Manifest {
                     "Description" => manifest.description = Some(value.to_string()),
                     "Author" => manifest.author = Some(value.to_string()),
                     "Dependencies" => {
-                        manifest.dependencies = value.split(',')
+                        manifest.dependencies = value
+                            .split(',')
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
-                    },
+                    }
                     "FFI-Libraries" => {
-                        manifest.ffi_libraries = value.split(',')
+                        manifest.ffi_libraries = value
+                            .split(',')
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
-                    },
+                    }
                     "Exports" => {
-                        manifest.exports = value.split(',')
+                        manifest.exports = value
+                            .split(',')
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
-                    },
+                    }
                     _ => {} // Unknown field, ignore
                 }
             } else {
-                return Err(IonPackError::InvalidManifest(
-                    format!("Invalid manifest line: {}", line)
-                ));
+                return Err(IonPackError::InvalidManifest(format!(
+                    "Invalid manifest line: {}",
+                    line
+                )));
             }
         }
-        
+
         Ok(manifest)
     }
 }
@@ -204,10 +214,10 @@ impl Manifest {
 /// IonPack builder for creating packages
 pub struct IonPackBuilder {
     manifest: Manifest,
-    classes: HashMap<String, Vec<u8>>, // class_name -> bytecode
+    classes: HashMap<String, Vec<u8>>,   // class_name -> bytecode
     libraries: HashMap<String, Vec<u8>>, // lib_name -> binary data
     resources: HashMap<String, Vec<u8>>, // resource_path -> data
-    sources: HashMap<String, String>, // source_path -> source code
+    sources: HashMap<String, String>,    // source_path -> source code
 }
 
 impl IonPackBuilder {
@@ -260,7 +270,11 @@ impl IonPackBuilder {
     }
 
     /// Add multiple functions as a single class (multi-function format)
-    pub fn add_multi_function_class(&mut self, name: &str, functions: &[Function]) -> Result<(), IonPackError> {
+    pub fn add_multi_function_class(
+        &mut self,
+        name: &str,
+        functions: &[Function],
+    ) -> Result<(), IonPackError> {
         let mut buffer = Vec::new();
         serialize_functions(functions, &mut buffer)?;
         self.classes.insert(name.to_string(), buffer);
@@ -278,7 +292,11 @@ impl IonPackBuilder {
     }
 
     /// Add a resource file to the package
-    pub fn add_resource<P: AsRef<Path>>(&mut self, path: &str, file_path: P) -> Result<(), IonPackError> {
+    pub fn add_resource<P: AsRef<Path>>(
+        &mut self,
+        path: &str,
+        file_path: P,
+    ) -> Result<(), IonPackError> {
         let mut file = File::open(file_path)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
@@ -344,7 +362,7 @@ pub struct IonPackReader<R: Read + Seek> {
 impl<R: Read + Seek> IonPackReader<R> {
     pub fn new(reader: R) -> Result<Self, IonPackError> {
         let mut archive = ZipArchive::new(reader)?;
-        
+
         // Read manifest
         let manifest = {
             let mut manifest_file = archive.by_name("META-INF/MANIFEST.ion")?;
@@ -367,7 +385,7 @@ impl<R: Read + Seek> IonPackReader<R> {
             let file = self.archive.by_index(i)?;
             let name = file.name();
             if name.starts_with("classes/") && name.ends_with(".ionc") {
-                let class_name = &name[8..name.len()-5]; // Remove "classes/" and ".ionc"
+                let class_name = &name[8..name.len() - 5]; // Remove "classes/" and ".ionc"
                 classes.push(class_name.to_string());
             }
         }
@@ -398,18 +416,22 @@ impl<R: Read + Seek> IonPackReader<R> {
     }
 
     /// Extract an FFI library to a temporary location
-    pub fn extract_library(&mut self, name: &str, target_dir: &Path) -> Result<PathBuf, IonPackError> {
+    pub fn extract_library(
+        &mut self,
+        name: &str,
+        target_dir: &Path,
+    ) -> Result<PathBuf, IonPackError> {
         let path = format!("lib/{}", name);
         let mut file = self.archive.by_name(&path)?;
-        
+
         let target_path = target_dir.join(name);
         if let Some(parent) = target_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         let mut target_file = File::create(&target_path)?;
         io::copy(&mut file, &mut target_file)?;
-        
+
         Ok(target_path)
     }
 
@@ -444,16 +466,19 @@ impl<R: Read + Seek> IonPackReader<R> {
     /// Load and deserialize all functions from a class (supports both single and multi-function formats)
     pub fn load_functions(&mut self, class_name: &str) -> Result<Vec<Function>, IonPackError> {
         let bytecode = self.read_class(class_name)?;
-        
+
         use std::io::Cursor;
-        
+
         let cursor = Cursor::new(bytecode);
-        deserialize_functions_auto(cursor)
-            .map_err(|e| IonPackError::BytecodeError(e))
+        deserialize_functions_auto(cursor).map_err(|e| IonPackError::BytecodeError(e))
     }
 
     /// Load a specific function by name from a class
-    pub fn load_function_by_name(&mut self, class_name: &str, function_name: &str) -> Result<Function, IonPackError> {
+    pub fn load_function_by_name(
+        &mut self,
+        class_name: &str,
+        function_name: &str,
+    ) -> Result<Function, IonPackError> {
         let functions = self.load_functions(class_name)?;
         for function in functions {
             if let Some(ref name) = function.name {
@@ -468,26 +493,28 @@ impl<R: Read + Seek> IonPackReader<R> {
     /// Load a function and resolve any embedded function references
     // pub fn load_function_with_registry(&mut self, function_name: &str, function_registry: &HashMap<String, Function>) -> Result<Function, IonPackError> {
     //     let bytecode = self.read_class(function_name)?;
-        
+
     //     use crate::bytecode_binary::deserialize_function_with_registry;
     //     use std::io::Cursor;
-        
+
     //     let mut cursor = Cursor::new(bytecode);
     //     deserialize_function_with_registry(&mut cursor, function_registry)
     //         .map_err(|e| IonPackError::BytecodeError(e))
     // }
 
     /// Load all functions from the IonPack into a registry (supports multi-function classes)
-    pub fn load_all_functions(&mut self) -> Result<HashMap<String, Rc<RefCell<Function>>>, IonPackError> {
+    pub fn load_all_functions(
+        &mut self,
+    ) -> Result<HashMap<String, Rc<RefCell<Function>>>, IonPackError> {
         let class_names = self.list_classes()?;
         let mut functions = HashMap::new();
         let mut class_functions_map = HashMap::new();
-        
+
         // First pass: load all functions from all classes and organize by class
         for class_name in &class_names {
             let class_functions = self.load_functions(class_name)?;
             class_functions_map.insert(class_name.clone(), class_functions.clone());
-            
+
             for function in class_functions {
                 if let Some(ref function_name) = function.name {
                     // Use function name as key if available
@@ -500,7 +527,7 @@ impl<R: Read + Seek> IonPackReader<R> {
                 }
             }
         }
-        
+
         // Second pass: resolve function references with class-aware resolution
         let mut resolved_functions = HashMap::new();
         for (class_name, class_functions) in &class_functions_map {
@@ -516,16 +543,19 @@ impl<R: Read + Seek> IonPackReader<R> {
                 for (name, f) in &functions {
                     class_local_registry.insert(name.clone(), f.clone());
                 }
-                
+
                 if let Some(ref function_name) = function.name {
                     //resolved_functions.insert(function_name.clone(), function.clone());
-                    resolved_functions.insert(format!("{}:{}", class_name, function_name), Rc::new(RefCell::new(function)));
+                    resolved_functions.insert(
+                        format!("{}:{}", class_name, function_name),
+                        Rc::new(RefCell::new(function)),
+                    );
                 } else {
                     resolved_functions.insert(class_name.clone(), Rc::new(RefCell::new(function)));
                 }
             }
         }
-        
+
         let resolv_clone = resolved_functions.clone();
         // for name in resolv_clone.keys() {
         //     println!("\x1b[36m[VM DEBUG]\x1b[0m found: {}", name); // Cyan color
@@ -535,12 +565,12 @@ impl<R: Read + Seek> IonPackReader<R> {
             // println!("\x1b[33m[VM DEBUG]\x1b[0m Resolving function references for: {}", name); // Yellow color
             resolve_function_references(function, &resolv_clone);
         }
-        
+
         Ok(resolved_functions)
     }
 
     /// Get the main function for CLI execution
-    /// 
+    ///
     /// CLI execution follows this resolution order:
     /// 1. If Entry-Point is specified in manifest, use that exact function
     /// 2. If Main-Class is specified in manifest, load that class and find main function
@@ -549,31 +579,35 @@ impl<R: Read + Seek> IonPackReader<R> {
     /// 5. If no Main-Class is specified, return an error
     /// 6. Resolve function references within the class
     pub fn get_main_function(&mut self) -> Result<Function, IonPackError> {
-        if let Ok(fns) = self.load_all_functions() {    
+        if let Ok(fns) = self.load_all_functions() {
             // Fall back to Main-Class behavior
-            let main_class = self.manifest.main_class.clone()
+            let main_class = self
+                .manifest
+                .main_class
+                .clone()
                 .ok_or(IonPackError::MainClassNotSpecified)?;
 
             // First check if Entry-Point is specified
             if let Some(ref entry_point) = self.manifest.entry_point {
-                if let Some(function) = fns.get(format!("{}:{}", main_class, entry_point).as_str()) {
+                if let Some(function) = fns.get(format!("{}:{}", main_class, entry_point).as_str())
+                {
                     return Ok(function.borrow().clone());
                 } else {
                     return Err(IonPackError::FunctionNotFound(entry_point.clone()));
                 }
             }
-            
+
             if let Some(function_ref) = fns.get(format!("{}:main", main_class).as_str()) {
                 let function = function_ref.borrow();
                 // If it's a multi-function class, find the first function with arity 0
                 if function.arity == 0 {
                     return Ok(function.clone());
-                } 
+                }
             } else {
                 return Err(IonPackError::ClassNotFound(main_class));
             }
         }
-        
+
         Err(IonPackError::MainFunctionNotFound)
     }
 
@@ -581,12 +615,12 @@ impl<R: Read + Seek> IonPackReader<R> {
     /// Extracts FFI libraries to a temporary directory and returns their paths
     pub fn setup_ffi_libraries(&mut self, temp_dir: &Path) -> Result<Vec<PathBuf>, IonPackError> {
         let mut extracted_libs = Vec::new();
-        
+
         for lib_name in &self.manifest.ffi_libraries.clone() {
             let lib_path = self.extract_library(lib_name, temp_dir)?;
             extracted_libs.push(lib_path);
         }
-        
+
         Ok(extracted_libs)
     }
 
@@ -609,8 +643,8 @@ impl<R: Read + Seek> IonPackReader<R> {
 mod tests {
     use super::*;
     use crate::value::Function;
+    use crate::value::{Primitive, Value};
     use crate::vm::Instruction;
-    use crate::value::{Value, Primitive};
     use std::io::{Cursor, SeekFrom};
 
     #[test]
@@ -640,11 +674,11 @@ mod tests {
         let function = Function::new_bytecode(
             Some("main".to_string()),
             0,
-            0,  // extra_regs - this simple function doesn't need extra registers
+            0, // extra_regs - this simple function doesn't need extra registers
             vec![
                 Instruction::LoadConst(0, Value::Primitive(Primitive::Number(42.0))),
                 Instruction::Return(0),
-            ]
+            ],
         );
 
         builder.add_class("Main", &function).unwrap();

@@ -1,11 +1,10 @@
 //! VM FFI - Foreign Function Interface for the VM
-//! 
+//!
 //! This library provides a bridge between the VM and external functions written in Rust
 //! and eventually Python. It's designed to be the foundation for the standard library.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-
 
 pub mod bridge;
 pub mod stdlib;
@@ -91,9 +90,9 @@ impl FfiRegistry {
 
     /// Get information about a registered function
     pub fn get_function_info(&self, name: &str) -> Option<(&str, usize, Option<&str>)> {
-        self.functions.get(name).map(|f| {
-            (f.name(), f.arity(), f.description())
-        })
+        self.functions
+            .get(name)
+            .map(|f| (f.name(), f.arity(), f.description()))
     }
 
     /// List all registered function names
@@ -218,10 +217,10 @@ mod tests {
     #[test]
     fn test_ffi_registry() {
         let mut registry = FfiRegistry::new();
-        
+
         // Test that we can list functions (should be empty)
         assert!(registry.list_functions().is_empty());
-        
+
         // Test function not found
         let result = registry.call("nonexistent", vec![]);
         assert!(matches!(result, Err(FfiError::FunctionNotFound(_))));
@@ -229,7 +228,10 @@ mod tests {
 
     #[test]
     fn test_ffi_error_display() {
-        let err = FfiError::ArgumentCount { expected: 2, got: 1 };
+        let err = FfiError::ArgumentCount {
+            expected: 2,
+            got: 1,
+        };
         assert_eq!(err.to_string(), "Expected 2 arguments, got 1");
 
         let err = FfiError::FunctionNotFound("test".to_string());

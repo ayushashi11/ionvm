@@ -1,12 +1,12 @@
 //! String functions for the standard library
 
-use crate::{FfiFunction, FfiValue, FfiResult, FfiError, FfiRegistry};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
 
 /// Macro to create string FFI functions with automatic argument checking
 macro_rules! string_function {
     ($name:ident, $arity:expr, $description:expr, |$args:ident| $body:expr) => {
         pub struct $name;
-        
+
         impl FfiFunction for $name {
             fn call(&self, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() != $arity {
@@ -17,15 +17,15 @@ macro_rules! string_function {
                 }
                 $body
             }
-            
+
             fn name(&self) -> &str {
                 stringify!($name)
             }
-            
+
             fn arity(&self) -> usize {
                 $arity
             }
-            
+
             fn description(&self) -> Option<&str> {
                 Some($description)
             }
@@ -66,9 +66,7 @@ string_function!(StrLower, 1, "Convert string to lowercase", |args| {
 
 string_function!(StrConcat, 2, "Concatenate two strings", |args| {
     match (&args[0], &args[1]) {
-        (FfiValue::String(a), FfiValue::String(b)) => {
-            Ok(FfiValue::String(format!("{}{}", a, b)))
-        }
+        (FfiValue::String(a), FfiValue::String(b)) => Ok(FfiValue::String(format!("{}{}", a, b))),
         _ => Err(FfiError::ArgumentType {
             expected: "String, String".to_string(),
             got: format!("{}, {}", args[0].type_name(), args[1].type_name()),
@@ -79,7 +77,8 @@ string_function!(StrConcat, 2, "Concatenate two strings", |args| {
 string_function!(StrSplit, 2, "Split string by delimiter", |args| {
     match (&args[0], &args[1]) {
         (FfiValue::String(s), FfiValue::String(delimiter)) => {
-            let parts: Vec<FfiValue> = s.split(delimiter)
+            let parts: Vec<FfiValue> = s
+                .split(delimiter)
                 .map(|part| FfiValue::String(part.to_string()))
                 .collect();
             Ok(FfiValue::Array(parts))
@@ -121,29 +120,46 @@ mod tests {
         register_string_functions(&mut registry);
 
         // Test string length
-        let result = registry.call("StrLength", vec![FfiValue::String("hello".to_string())]).unwrap();
+        let result = registry
+            .call("StrLength", vec![FfiValue::String("hello".to_string())])
+            .unwrap();
         assert_eq!(result, FfiValue::Number(5.0));
 
         // Test string concat
-        let result = registry.call("StrConcat", vec![
-            FfiValue::String("hello".to_string()),
-            FfiValue::String(" world".to_string())
-        ]).unwrap();
+        let result = registry
+            .call(
+                "StrConcat",
+                vec![
+                    FfiValue::String("hello".to_string()),
+                    FfiValue::String(" world".to_string()),
+                ],
+            )
+            .unwrap();
         assert_eq!(result, FfiValue::String("hello world".to_string()));
 
         // Test string upper
-        let result = registry.call("StrUpper", vec![FfiValue::String("hello".to_string())]).unwrap();
+        let result = registry
+            .call("StrUpper", vec![FfiValue::String("hello".to_string())])
+            .unwrap();
         assert_eq!(result, FfiValue::String("HELLO".to_string()));
-        
+
         // Test string split
-        let result = registry.call("StrSplit", vec![
-            FfiValue::String("a,b,c".to_string()),
-            FfiValue::String(",".to_string())
-        ]).unwrap();
-        assert_eq!(result, FfiValue::Array(vec![
-            FfiValue::String("a".to_string()),
-            FfiValue::String("b".to_string()),
-            FfiValue::String("c".to_string())
-        ]));
+        let result = registry
+            .call(
+                "StrSplit",
+                vec![
+                    FfiValue::String("a,b,c".to_string()),
+                    FfiValue::String(",".to_string()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            FfiValue::Array(vec![
+                FfiValue::String("a".to_string()),
+                FfiValue::String("b".to_string()),
+                FfiValue::String("c".to_string())
+            ])
+        );
     }
 }

@@ -1,7 +1,7 @@
 use std::fs::File;
-use vmm::value::{Function, Value, Primitive};
-use vmm::vm::Instruction;
 use vmm::bytecode_binary::serialize_function;
+use vmm::value::{Function, Primitive, Value};
+use vmm::vm::Instruction;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating a standalone .ionc file...");
@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Instruction::LoadConst(1, Value::Primitive(Primitive::Number(10.0))),
             Instruction::Add(2, 0, 1), // r2 = arg + 10
             Instruction::Return(2),
-        ]
+        ],
     );
 
     // Serialize to .ionc file
