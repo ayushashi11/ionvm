@@ -1,5 +1,6 @@
 use crate::ffi_integration::{FfiCallResult, call_ffi_function};
 use crate::value::{Function, ProcessStatus, Value};
+use crate::Primitive;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -88,6 +89,7 @@ pub struct IonVM {
     pub run_queue: VecDeque<usize>,
     pub next_pid: usize,
     pub reduction_limit: u32,
+    pub timeslice: u32, // Number of instructions per process before preemption
     pub scheduler_passes: u64,
     pub ffi_registry: FfiRegistry,
     stdlib_functions: Option<HashMap<String, Value>>, // For stdlib function references
@@ -102,6 +104,7 @@ impl IonVM {
             run_queue: VecDeque::new(),
             next_pid: 1,
             reduction_limit: 2000, // Standard Erlang reduction count
+            timeslice: 3, // Default timeslice for preemptive scheduling
             scheduler_passes: 0,
             ffi_registry: FfiRegistry::with_stdlib(),
             stdlib_functions: None,
@@ -117,6 +120,7 @@ impl IonVM {
             run_queue: VecDeque::new(),
             next_pid: 1,
             reduction_limit: 2000,
+            timeslice: 3,
             scheduler_passes: 0,
             ffi_registry,
             stdlib_functions: None,
@@ -443,8 +447,8 @@ impl IonVM {
     ) -> ExecutionResult {
         let mut proc = proc_ref.borrow_mut();
 
-        // Reset reduction budget for this scheduling round
-        proc.reset_reductions(self.reduction_limit);
+        // Reset reduction budget for this scheduling round (use timeslice for preemption)
+        proc.reset_reductions(self.timeslice);
 
         while proc.reductions > 0 && proc.status == ProcessStatus::Runnable {
             // Check if process has frames to execute
@@ -555,7 +559,7 @@ impl IonVM {
                                     PropertyDescriptor {
                                         value: frame.registers[reg].clone(),
                                         writable: true,
-                                        enumerable: true,
+                                        enumerable: false,
                                         configurable: true,
                                     },
                                 );
@@ -566,7 +570,7 @@ impl IonVM {
                                     PropertyDescriptor {
                                         value: val.clone(),
                                         writable: true,
-                                        enumerable: true,
+                                        enumerable: false,
                                         configurable: true,
                                     },
                                 );
@@ -647,6 +651,34 @@ impl IonVM {
                             frame.registers[dst] =
                                 Value::Primitive(crate::value::Primitive::Number(x + y));
                         }
+                        (
+                            Value::Primitive(crate::value::Primitive::Complex(cx)),
+                            Value::Primitive(crate::value::Primitive::Complex(cy)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(cx + cy));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(n)),
+                            Value::Primitive(crate::value::Primitive::Complex(c)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(n + c));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Complex(c)),
+                            Value::Primitive(crate::value::Primitive::Number(n)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(c + n));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::String(sx)),
+                            Value::Primitive(crate::value::Primitive::String(sy)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::String(sx.clone() + sy));
+                        }
                         _ => {
                             frame.registers[dst] =
                                 Value::Primitive(crate::value::Primitive::Undefined);
@@ -672,6 +704,27 @@ impl IonVM {
                         ) => {
                             frame.registers[dst] =
                                 Value::Primitive(crate::value::Primitive::Number(x - y));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Complex(cx)),
+                            Value::Primitive(crate::value::Primitive::Complex(cy)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(cx - cy));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(n)),
+                            Value::Primitive(crate::value::Primitive::Complex(c)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(n - c));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Complex(c)),
+                            Value::Primitive(crate::value::Primitive::Number(n)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(c - n));
                         }
                         _ => {
                             frame.registers[dst] =
@@ -699,6 +752,43 @@ impl IonVM {
                             frame.registers[dst] =
                                 Value::Primitive(crate::value::Primitive::Number(x * y));
                         }
+                        (
+                            Value::Primitive(crate::value::Primitive::Complex(cx)),
+                            Value::Primitive(crate::value::Primitive::Complex(cy)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(cx * cy));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Complex(c)),
+                            Value::Primitive(crate::value::Primitive::Number(n)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(c * n));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(n)),
+                            Value::Primitive(crate::value::Primitive::Complex(c)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(n * c));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::String(sx)),
+                            Value::Primitive(crate::value::Primitive::Number(n)),
+                        ) => {
+                            // String multiplication with number (repeat string)
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::String(sx.repeat(*n as usize)));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(n)),
+                            Value::Primitive(crate::value::Primitive::String(sx)),
+                        ) => {
+                            // Number multiplication with string (repeat string)
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::String(sx.repeat(*n as usize)));
+                        }
                         _ => {
                             frame.registers[dst] =
                                 Value::Primitive(crate::value::Primitive::Undefined);
@@ -725,6 +815,33 @@ impl IonVM {
                             if *y != 0.0 {
                                 frame.registers[dst] =
                                     Value::Primitive(crate::value::Primitive::Number(x / y));
+                            } else {
+                                // Division by zero - return Undefined or could be Error
+                                frame.registers[dst] =
+                                    Value::Primitive(crate::value::Primitive::Undefined);
+                            }
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Complex(cx)),
+                            Value::Primitive(crate::value::Primitive::Complex(cy)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(cx / cy));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Number(x)),
+                            Value::Primitive(crate::value::Primitive::Complex(cy)),
+                        ) => {
+                            frame.registers[dst] =
+                                Value::Primitive(crate::value::Primitive::Complex(x / *cy));
+                        }
+                        (
+                            Value::Primitive(crate::value::Primitive::Complex(cx)),
+                            Value::Primitive(crate::value::Primitive::Number(y)),
+                        ) => {
+                            if *y != 0.0 {
+                                frame.registers[dst] =
+                                    Value::Primitive(crate::value::Primitive::Complex(cx / *y));
                             } else {
                                 // Division by zero - return Undefined or could be Error
                                 frame.registers[dst] =
@@ -795,6 +912,17 @@ impl IonVM {
                             let obj = obj_rc.borrow();
                             obj.get_property(key)
                                 .unwrap_or(Value::Primitive(crate::value::Primitive::Undefined))
+                        }
+                        (
+                            Value::Primitive(Primitive::Atom(this)),
+                            Value::Primitive(Primitive::Atom(key))
+                        ) if this=="__vm:this" => {
+                            if let Some(Value::Object(this)) = &frame.function.bound_this {
+                                this.borrow().get_this_property(key).unwrap_or(Value::Primitive(crate::Primitive::Undefined))
+                            }
+                            else {
+                                panic!("this is not bound")
+                            }
                         }
                         _ => Value::Primitive(crate::value::Primitive::Undefined),
                     };
@@ -1638,7 +1766,7 @@ impl IonVM {
                 }
             }
             // Deliver the message and set result register if needed
-            if let Some((frame_count, Some(msg))) = deliver {
+            if let Some((_frame_count, Some(msg))) = deliver {
                 let mut proc = proc_ref.borrow_mut();
                 if let Some(frame) = proc.frames.last_mut() {
                     if frame.ip > 0 {

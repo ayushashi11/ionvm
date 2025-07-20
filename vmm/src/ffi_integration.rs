@@ -16,9 +16,10 @@ impl ToFfiValue for Value {
             Value::Primitive(Primitive::Number(n)) => FfiValue::Number(*n),
             Value::Primitive(Primitive::Boolean(b)) => FfiValue::Boolean(*b),
             Value::Primitive(Primitive::String(s)) => {
-                FfiValue::String(format!("\"{}\"", s.clone()))
-            }
-            Value::Primitive(Primitive::Atom(s)) => FfiValue::String(s.clone()),
+                FfiValue::String(s.clone())
+            },
+            Value::Primitive(Primitive::Complex(c)) => FfiValue::Complex(c.clone()),
+            Value::Primitive(Primitive::Atom(s)) => FfiValue::Atom(s.clone()),
             Value::Primitive(Primitive::Unit) => FfiValue::Unit,
             Value::Primitive(Primitive::Undefined) => FfiValue::Undefined,
 
@@ -63,7 +64,9 @@ impl FromFfiValue for Value {
         match value {
             FfiValue::Number(n) => Ok(Value::Primitive(Primitive::Number(n))),
             FfiValue::Boolean(b) => Ok(Value::Primitive(Primitive::Boolean(b))),
+            FfiValue::Atom(s) => Ok(Value::Primitive(Primitive::Atom(s))),
             FfiValue::String(s) => Ok(Value::Primitive(Primitive::Atom(s))),
+            FfiValue::Complex(c) => Ok(Value::Primitive(Primitive::Complex(c))),
             FfiValue::Unit => Ok(Value::Primitive(Primitive::Unit)),
             FfiValue::Undefined => Ok(Value::Primitive(Primitive::Undefined)),
             FfiValue::Tuple(arr) => {

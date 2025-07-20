@@ -75,10 +75,11 @@ mod object_init_tests {
     }
 }
 // Core value and object model types for the prototype-based VM
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+use num_complex::Complex64;
 
 pub type Atom = String; // Atoms are interned strings in some languages; here, just String for now
 
@@ -86,6 +87,7 @@ pub type Atom = String; // Atoms are interned strings in some languages; here, j
 pub enum Primitive {
     Number(f64),
     Boolean(bool),
+    Complex(Complex64),
     String(String), // Mutable strings for text manipulation
     Atom(Atom),     // Immutable interned symbols for identifiers
     Unit,
@@ -152,7 +154,14 @@ impl Object {
     /// If not found, tries __getattr__ magic method if present.
     pub fn get_property(&self, key: &str) -> Option<Value> {
         if let Some(desc) = self.properties.get(key) {
-            Some(desc.value.clone())
+            if !desc.configurable {
+                panic!("attempt to get private property '{}' of {:?}", key, self)
+            }
+            return if desc.enumerable{
+                None
+            } else {
+                Some(desc.value.clone())
+            }
         } else if let Some(proto) = &self.prototype {
             proto.borrow().get_property(key)
         } else if let Some(_magic) = self.magic_methods.get("__getattr__") {
@@ -164,6 +173,23 @@ impl Object {
         }
     }
 
+    pub fn get_this_property(&self, key: &str) -> Option<Value>{
+        if let Some(desc) = self.properties.get(key) {
+            return if desc.enumerable{
+                None
+            } else {
+                Some(desc.value.clone())
+            }
+        } else if let Some(proto) = &self.prototype {
+            proto.borrow().get_property(key)
+        } else if let Some(_magic) = self.magic_methods.get("__getattr__") {
+            // Call __getattr__ with key as argument (not implemented here)
+            // Placeholder: just return None for now
+            None
+        } else {
+            None
+        }
+    }
     /// Set a property, creating or updating as needed.
     /// If __setattr__ magic method exists, call it instead.
     pub fn set_property(&mut self, key: &str, value: Value) {
@@ -177,11 +203,39 @@ impl Object {
                 .or_insert(PropertyDescriptor {
                     value: value.clone(),
                     writable: true,
-                    enumerable: true,
+                    enumerable: false,
                     configurable: true,
                 });
-            if desc.writable {
+            if desc.writable && desc.configurable && !desc.enumerable {
                 desc.value = value;
+            }
+            else {
+                // If not writable or configurable, we could throw an error or ignore
+                println!("Warning: Attempted to set read-only or private property '{}'", key);
+            }
+        }
+    }
+
+    pub fn set_this_property(&mut self, key: &str, value: Value) {
+        if let Some(_magic) = self.magic_methods.get("__setattr__") {
+            // Call __setattr__ with key and value as arguments (not implemented here)
+            // Placeholder: do nothing for now
+        } else {
+            let desc = self
+                .properties
+                .entry(key.to_string())
+                .or_insert(PropertyDescriptor {
+                    value: value.clone(),
+                    writable: true,
+                    enumerable: false,
+                    configurable: true,
+                });
+            if desc.writable && !desc.enumerable {
+                desc.value = value;
+            }
+            else {
+                // If not writable, we could throw an error or ignore
+                println!("Warning: Attempted to set read-only property '{}'", key);
             }
         }
     }

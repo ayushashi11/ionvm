@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use num_complex::Complex64;
+
 pub mod bridge;
 pub mod stdlib;
 // TODO: pub mod python_ffi;
@@ -15,7 +17,9 @@ pub mod stdlib;
 pub enum FfiValue {
     Number(f64),
     Boolean(bool),
+    Atom(String),
     String(String),
+    Complex(Complex64),
     Unit,
     Undefined,
     Tuple(Vec<FfiValue>),
@@ -57,6 +61,9 @@ pub trait FfiFunction: Send + Sync {
     fn call(&self, args: Vec<FfiValue>) -> FfiResult;
     fn name(&self) -> &str;
     fn arity(&self) -> usize;
+    fn is_variadic(&self) -> bool {
+        false
+    }
     fn description(&self) -> Option<&str> {
         None
     }
@@ -168,8 +175,10 @@ impl FfiValue {
         match self {
             FfiValue::Number(_) => "Number",
             FfiValue::Boolean(_) => "Boolean",
+            FfiValue::Atom(_) => "Atom",
             FfiValue::String(_) => "String",
             FfiValue::Unit => "Unit",
+            FfiValue::Complex(_) => "Complex",
             FfiValue::Undefined => "Undefined",
             FfiValue::Tuple(_) => "Tuple",
             FfiValue::Array(_) => "Array",
@@ -182,11 +191,13 @@ impl FfiValue {
         match self {
             FfiValue::Boolean(b) => *b,
             FfiValue::Number(n) => *n != 0.0,
+            FfiValue::Atom(s) => !s.is_empty(),
             FfiValue::String(s) => !s.is_empty(),
             FfiValue::Tuple(arr) => !arr.is_empty() && arr.iter().all(|v| v.is_truthy()),
             FfiValue::Array(arr) => !arr.is_empty(),
             FfiValue::Object(obj) => !obj.is_empty(),
             FfiValue::Unit | FfiValue::Undefined => false,
+            FfiValue::Complex(c) => c.re != 0.0 && c.im != 0.0, // Complex is truthy if not zero
         }
     }
 }

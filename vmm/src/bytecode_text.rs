@@ -122,6 +122,7 @@ pub fn value_to_text(val: &Value) -> String {
             }
         }
         Value::Primitive(Primitive::Boolean(b)) => b.to_string(),
+        Value::Primitive(Primitive::Complex(c)) => c.to_string(),
         Value::Primitive(Primitive::String(s)) => {
             format!("\"{}\"", s.replace("\\", "\\\\").replace("\"", "\\\""))
         }

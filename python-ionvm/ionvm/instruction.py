@@ -169,8 +169,12 @@ class Instruction:
     
     # Pattern matching
     @classmethod
-    def match(cls, value: float, patterns: List, jump_table: List[float]) -> 'Instruction':
-        """Pattern match value against patterns with jump table."""
+    def match(cls, value: float, patterns: list, jump_table: list) -> 'Instruction':
+        """
+        Pattern match value against patterns with jump table.
+        patterns: list of Pattern objects (see pattern.py)
+        jump_table: list of jump offsets (ints)
+        """
         return cls("match", value, patterns, jump_table)
     
     # Other instructions
@@ -237,6 +241,15 @@ class Instruction:
         writer.write_u8(opcodes[self.opcode])
         
         # Serialize arguments based on instruction type
+        if self.opcode == "match":
+            # args: value_reg, patterns (list of Pattern), jump_table (list of offsets)
+            value_reg, patterns, jump_table = self.args
+            writer.write_u32(int(value_reg))
+            writer.write_u32(len(patterns))
+            for pat, offset in zip(patterns, jump_table):
+                pat.serialize(writer)
+                writer.write_i32(int(offset))
+            return
         if self.opcode == "object_init":
             dst, kvs = self.args
             writer.write_u32(dst)
@@ -246,11 +259,11 @@ class Instruction:
                 # Normalize arg to (kind, value, flags)
                 if len(arg) == 2:
                     kind, value = arg
-                    flags = {'writeable': True, 'enumerable': True, 'configurable': True}
+                    flags = {'writeable': True, 'enumerable': False, 'configurable': True}
                 elif len(arg) == 3:
                     kind, value, flags = arg
                     # Fill missing flags with True
-                    flags = {k: flags.get(k, True) for k in ['writeable', 'enumerable', 'configurable']}
+                    flags = {k: flags.get(k, k!='enumerable') for k in ['writeable', 'enumerable', 'configurable']}
                 else:
                     raise ValueError(f"Invalid ObjectInitArg: {arg}")
                 if kind == 'reg':

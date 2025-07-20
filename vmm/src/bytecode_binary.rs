@@ -3,6 +3,8 @@
 //! This module provides functionality to serialize and deserialize
 //! bytecode to/from a compact binary format for distribution and storage.
 
+use num_complex::Complex64;
+
 use crate::value::{Function, FunctionType, Primitive, Value};
 use crate::vm::{Instruction, Pattern};
 use std::cell::RefCell;
@@ -136,7 +138,9 @@ enum ValueTag {
     Array = 0x06,
     Object = 0x07,
     Function = 0x08,
-    String = 0x09, // New tag for String type
+    String = 0x09,
+    Complex = 0x0A,
+    Tuple = 0x0B, // New tag for Tuple
 }
 
 /// Binary writer helper
@@ -200,6 +204,11 @@ impl<W: Write> BinaryWriter<W> {
                 self.write_u8(ValueTag::String as u8)?;
                 self.write_string(s)?;
             }
+            Value::Primitive(Primitive::Complex(c)) => {
+                self.write_u8(ValueTag::Complex as u8)?;
+                self.write_f64(c.re)?;
+                self.write_f64(c.im)?;
+            }
             Value::Primitive(Primitive::Unit) => {
                 self.write_u8(ValueTag::Unit as u8)?;
             }
@@ -236,7 +245,7 @@ impl<W: Write> BinaryWriter<W> {
                 }
             }
             Value::Tuple(tuple) => {
-                self.write_u8(0x09)?; // New tag for Tuple
+                self.write_u8(0x0B)?; // New tag for Tuple
                 self.write_u32(tuple.len() as u32)?;
                 for item in tuple.iter() {
                     self.write_value(item)?;
@@ -554,6 +563,11 @@ impl<R: Read> BinaryReader<R> {
                 let s = self.read_string()?;
                 Ok(Value::Primitive(Primitive::String(s)))
             }
+            x if x == ValueTag::Complex as u8 => {
+                let re = self.read_f64()?;
+                let im = self.read_f64()?;
+                Ok(Value::Primitive(Primitive::Complex(Complex64::new(re, im))))
+            }
             x if x == ValueTag::Unit as u8 => Ok(Value::Primitive(Primitive::Unit)),
             x if x == ValueTag::Undefined as u8 => Ok(Value::Primitive(Primitive::Undefined)),
             x if x == ValueTag::Array as u8 => {
@@ -566,6 +580,16 @@ impl<R: Read> BinaryReader<R> {
                     items.push(self.read_value()?);
                 }
                 Ok(Value::Array(Rc::new(RefCell::new(items))))
+            }
+            x if x == ValueTag::Tuple as u8 => {
+                use std::rc::Rc;
+
+                let len = self.read_u32()? as usize;
+                let mut items = Vec::with_capacity(len);
+                for _ in 0..len {
+                    items.push(self.read_value()?);
+                }
+                Ok(Value::Tuple(Rc::new(items)))
             }
             x if x == ValueTag::Object as u8 => {
                 use crate::value::{Object, PropertyDescriptor};
@@ -601,17 +625,6 @@ impl<R: Read> BinaryReader<R> {
                     "function:{}",
                     name
                 ))))
-            }
-            0x09 => {
-                // Tuple tag
-                use std::rc::Rc;
-
-                let len = self.read_u32()? as usize;
-                let mut items = Vec::with_capacity(len);
-                for _ in 0..len {
-                    items.push(self.read_value()?);
-                }
-                Ok(Value::Tuple(Rc::new(items)))
             }
             _ => Err(BytecodeError::InvalidValue(format!(
                 "Unknown value tag: {}",

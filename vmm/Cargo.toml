@@ -20,5 +20,6 @@ name = "create_ionc"
 path = "src/bin/create_ionc.rs"
 
 [dependencies]
+num-complex = "0.4.6"
 vm-ffi = { path = "../vm-ffi" }
 zip = "0.6"

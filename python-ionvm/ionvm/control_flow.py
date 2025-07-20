@@ -1,3 +1,35 @@
+#
+# MatchBuilder for ergonomic pattern matching
+from .pattern import Pattern
+
+class MatchBuilder:
+    """
+    Builder for match/case pattern matching blocks.
+    Example:
+        builder = MatchBuilder(value_reg)
+        builder.case(Pattern.value(Value.number(1)), [Instruction.load_const(0, Value.number(42))])
+        builder.case(Pattern.wildcard(), [Instruction.load_const(0, Value.number(0))])
+        instructions = builder.build()
+    """
+    def __init__(self, value_reg):
+        self.value_reg = value_reg
+        self.patterns = []
+        self.jump_table = []
+        self.blocks = []
+    def case(self, pattern, instructions):
+        self.patterns.append(pattern)
+        self.blocks.append(list(instructions))
+        return self
+    def build(self):
+        # Compute jump offsets for each block
+        instrs = []
+        jump_table = []
+        for block in self.blocks:
+            jump_table.append(len(instrs) + 1)  # +1 for the match instruction itself
+            instrs.extend(block)
+        # Add the match instruction at the start
+        instrs = [Instruction.match(self.value_reg, self.patterns, jump_table)] + instrs
+        return instrs
 """
 Control flow builders for IonVM bytecode generation.
 

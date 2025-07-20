@@ -34,6 +34,11 @@ class Value:
         return cls("string", str(s))
     
     @classmethod
+    def complex(cls, cp: complex) -> 'Value':
+        """Create a complex number value."""
+        return cls("complex", cp)
+    
+    @classmethod
     def unit(cls) -> 'Value':
         """Create a unit value."""
         return cls("unit", None)
@@ -93,6 +98,10 @@ class Value:
         elif self.value_type == "string":
             writer.write_u8(0x09)
             writer.write_string(self.data)
+        elif self.value_type == "complex":
+            writer.write_u8(0x0A)
+            writer.write_f64(self.data.real)
+            writer.write_f64(self.data.imag)
         elif self.value_type == "unit":
             writer.write_u8(0x04)  # Unit tag
         elif self.value_type == "undefined":
@@ -116,7 +125,7 @@ class Value:
             writer.write_u8(0x08)  # Function tag
             writer.write_string(self.data)
         elif self.value_type == "tuple":
-            writer.write_u8(0x09)  # Tuple tag
+            writer.write_u8(0x0B)  # Tuple tag
             writer.write_u32(len(self.data))
             for item in self.data:
                 item.serialize(writer)

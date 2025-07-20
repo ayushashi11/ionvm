@@ -4,11 +4,13 @@ IonVM Python Library
 Python library for creating IonVM bytecode and IonPack files.
 """
 
+
 from .value import Value
 from .instruction import Instruction
 from .function import Function
 from .bytecode import BytecodeWriter
 from .ionpack import IonPackBuilder, Manifest
+from .pattern import Pattern
 from .control_flow import (
     IfElseBuilder, 
     WhileThenElseBuilder,
@@ -26,6 +28,7 @@ __all__ = [
     "BytecodeWriter",
     "IonPackBuilder",
     "Manifest",
+    "Pattern",
     "IfElseBuilder",
     "WhileThenElseBuilder",
     "build_if_else",

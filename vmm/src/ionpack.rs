@@ -579,7 +579,8 @@ impl<R: Read + Seek> IonPackReader<R> {
     /// 5. If no Main-Class is specified, return an error
     /// 6. Resolve function references within the class
     pub fn get_main_function(&mut self) -> Result<Function, IonPackError> {
-        if let Ok(fns) = self.load_all_functions() {
+        match(self.load_all_functions()){
+        Ok(fns) => {
             // Fall back to Main-Class behavior
             let main_class = self
                 .manifest
@@ -607,6 +608,8 @@ impl<R: Read + Seek> IonPackReader<R> {
                 return Err(IonPackError::ClassNotFound(main_class));
             }
         }
+        Err(e) => return Err(e)
+    }
 
         Err(IonPackError::MainFunctionNotFound)
     }
