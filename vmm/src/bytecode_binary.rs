@@ -84,6 +84,8 @@ enum Opcode {
     Not = 0x1D,
     ReceiveWithTimeout = 0x1E,
     ObjectInit = 0x1F,
+    Select = 0x20,
+    SelectWithKill = 0x21, 
 }
 
 impl TryFrom<u8> for Opcode {
@@ -122,6 +124,8 @@ impl TryFrom<u8> for Opcode {
             0x1D => Ok(Opcode::Not),
             0x1E => Ok(Opcode::ReceiveWithTimeout),
             0x1F => Ok(Opcode::ObjectInit),
+            0x20 => Ok(Opcode::Select),
+            0x21 => Ok(Opcode::SelectWithKill),
             _ => Err(BytecodeError::InvalidOpcode(value)),
         }
     }
@@ -429,9 +433,10 @@ impl<W: Write> BinaryWriter<W> {
                 self.write_u32(*timeout as u32)?;
                 self.write_u32(*result as u32)?;
             }
-            Instruction::Link(proc) => {
+            Instruction::Link(proc, store_reg) => {
                 self.write_u8(Opcode::Link as u8)?;
                 self.write_u32(*proc as u32)?;
+                self.write_u32(*store_reg as u32)?;
             }
             Instruction::Match(src, patterns) => {
                 self.write_u8(Opcode::Match as u8)?;
@@ -496,6 +501,22 @@ impl<W: Write> BinaryWriter<W> {
                 self.write_u8(Opcode::Not as u8)?;
                 self.write_u32(*dst as u32)?;
                 self.write_u32(*src as u32)?;
+            }
+            Instruction::Select(dst, pids) => {
+                self.write_u8(Opcode::Select as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(pids.len() as u32)?;
+                for pid in pids {
+                    self.write_u32(*pid as u32)?;
+                }
+            }
+            Instruction::SelectWithKill(dst, pids) => {
+                self.write_u8(Opcode::SelectWithKill as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(pids.len() as u32)?;
+                for pid in pids {
+                    self.write_u32(*pid as u32)?;
+                }
             }
         }
         Ok(())
@@ -823,7 +844,8 @@ impl<R: Read> BinaryReader<R> {
             }
             Opcode::Link => {
                 let proc = self.read_u32()? as usize;
-                Ok(Instruction::Link(proc))
+                let store_reg = self.read_u32()? as usize;
+                Ok(Instruction::Link(proc, store_reg))
             }
             Opcode::Match => {
                 let src = self.read_u32()? as usize;
@@ -890,6 +912,24 @@ impl<R: Read> BinaryReader<R> {
                 let dst = self.read_u32()? as usize;
                 let src = self.read_u32()? as usize;
                 Ok(Instruction::Not(dst, src))
+            }
+            Opcode::Select => {
+                let dst = self.read_u32()? as usize;
+                let count = self.read_u32()? as usize;
+                let mut pids = Vec::with_capacity(count);
+                for _ in 0..count {
+                    pids.push(self.read_u32()? as usize);
+                }
+                Ok(Instruction::Select(dst, pids))
+            }
+            Opcode::SelectWithKill => {
+                let dst = self.read_u32()? as usize;
+                let count = self.read_u32()? as usize;
+                let mut pids = Vec::with_capacity(count);
+                for _ in 0..count {
+                    pids.push(self.read_u32()? as usize);
+                }
+                Ok(Instruction::SelectWithKill(dst, pids))
             }
         }
     }

@@ -1,7 +1,52 @@
-//! VM FFI - Foreign Function Interface for the VM
+//! # VM FFI - Foreign Function Interface
 //!
-//! This library provides a bridge between the VM and external functions written in Rust
-//! and eventually Python. It's designed to be the foundation for the standard library.
+//! This library provides a bridge between the IonVM and external functions written in Rust.
+//! It enables the VM to call native functions for performance-critical operations and
+//! standard library functionality.
+//! 
+//! # Overview
+//! 
+//! The FFI system consists of:
+//! - [`FfiValue`] - Value types that cross the VM/native boundary
+//! - [`FfiFunction`] - Trait for implementing native functions  
+//! - [`FfiRegistry`] - Registry for registering and calling functions
+//! - [`bridge`] - Conversion utilities between VM and FFI values
+//! - [`stdlib`] - Standard library function implementations
+//! 
+//! # Example
+//! 
+//! ```rust
+//! use vm_ffi::{FfiRegistry, FfiFunction, FfiValue, FfiResult};
+//! 
+//! struct AddFunction;
+//! 
+//! impl FfiFunction for AddFunction {
+//!     fn call(&self, args: Vec<FfiValue>) -> FfiResult {
+//!         if args.len() != 2 {
+//!             return Err(vm_ffi::FfiError::ArgumentCount { expected: 2, got: args.len() });
+//!         }
+//!         
+//!         match (&args[0], &args[1]) {
+//!             (FfiValue::Number(a), FfiValue::Number(b)) => {
+//!                 Ok(FfiValue::Number(a + b))
+//!             }
+//!             _ => Err(vm_ffi::FfiError::RuntimeError("Invalid arguments".to_string()))
+//!         }
+//!     }
+//!     
+//!     fn name(&self) -> &str { "add" }
+//!     fn arity(&self) -> usize { 2 }
+//! }
+//! 
+//! let mut registry = FfiRegistry::new();
+//! registry.register(AddFunction);
+//! 
+//! let result = registry.call("add", vec![
+//!     FfiValue::Number(1.0), 
+//!     FfiValue::Number(2.0)
+//! ]);
+//! assert_eq!(result.unwrap(), FfiValue::Number(3.0));
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,7 +55,6 @@ use num_complex::Complex64;
 
 pub mod bridge;
 pub mod stdlib;
-// TODO: pub mod python_ffi;
 
 /// Represents a value that can be passed between the VM and external functions
 #[derive(Debug, Clone, PartialEq)]

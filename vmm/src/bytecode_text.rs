@@ -86,7 +86,7 @@ pub fn instruction_to_text(instr: &Instruction) -> String {
         Instruction::ReceiveWithTimeout(dst, timeout, result) => {
             format!("RECEIVE_WITH_TIMEOUT r{}, r{}, r{}", dst, timeout, result)
         }
-        Instruction::Link(proc) => format!("LINK r{}", proc),
+        Instruction::Link(proc, store_reg) => format!("LINK process{}, r{}", proc, store_reg),
         Instruction::Match(src, patterns) => {
             let patterns_str = patterns
                 .iter()
@@ -108,6 +108,23 @@ pub fn instruction_to_text(instr: &Instruction) -> String {
         Instruction::And(dst, a, b) => format!("AND r{}, r{}, r{}", dst, a, b),
         Instruction::Or(dst, a, b) => format!("OR r{}, r{}, r{}", dst, a, b),
         Instruction::Not(dst, src) => format!("NOT r{}, r{}", dst, src),
+
+        Instruction::Select(dst, pids) => {
+            let pids_str = pids
+                .iter()
+                .map(|pid| format!("r{}", pid))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("SELECT r{}, [{}]", dst, pids_str)
+        }
+        Instruction::SelectWithKill(dst, pids) => {
+            let pids_str = pids
+                .iter()
+                .map(|pid| format!("r{}", pid))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("SELECT_WITH_KILL r{}, [{}]", dst, pids_str)
+        }
     }
 }
 

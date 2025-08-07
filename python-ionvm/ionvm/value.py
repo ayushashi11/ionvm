@@ -1,5 +1,12 @@
 """
 IonVM Value types and creation utilities.
+
+This module provides the Value class for creating IonVM-compatible values
+that can be serialized into bytecode and used in IonVM programs.
+
+The IonVM supports various value types from primitives (numbers, booleans)
+to complex structures (objects, arrays, tuples). This module provides
+a Python API for creating these values programmatically.
 """
 from typing import Dict, List, Any, Optional
 
@@ -7,6 +14,24 @@ from typing import Dict, List, Any, Optional
 class Value:
     """
     Represents an IonVM value that can be serialized to bytecode.
+    
+    IonVM values are typed data that can be stored in registers, passed as
+    arguments, and manipulated by VM instructions. This class provides
+    factory methods for creating different types of values.
+    
+    Attributes:
+        value_type: String identifier for the value type
+        data: The actual data content of the value
+        
+    Example:
+        >>> # Create basic values
+        >>> num = Value.number(42.5)
+        >>> text = Value.string("hello world") 
+        >>> flag = Value.boolean(True)
+        >>> 
+        >>> # Create complex values
+        >>> items = Value.array([Value.number(1), Value.number(2)])
+        >>> obj = Value.object({"x": Value.number(10), "y": Value.number(20)})
     """
     
     def __init__(self, value_type: str, data: Any):

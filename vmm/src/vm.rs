@@ -7,94 +7,384 @@ use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use vm_ffi::FfiRegistry;
 
-// Timeout tracking for receive_with_timeout operations
+/// Timeout tracking for receive_with_timeout operations
+/// 
+/// This struct tracks pending timeout operations to handle them when they expire.
+/// Each timeout is associated with a specific process and call frame.
 #[derive(Debug)]
 struct TimeoutInfo {
+    /// Process ID that set the timeout
     pid: usize,
+    /// Register to store received message
     dst_reg: usize,
+    /// Register to store timeout result (true if message received, false if timeout)
     result_reg: usize,
-    expiry_ms: u64,     // When timeout expires (milliseconds since UNIX_EPOCH)
-    frame_index: usize, // Index of the frame for this timeout
+    /// When timeout expires (milliseconds since UNIX_EPOCH)
+    expiry_ms: u64,
+    /// Index of the frame for this timeout
+    frame_index: usize,
 }
 
+/// Result of executing an instruction or process slice
+/// 
+/// This enum represents the various outcomes when executing VM instructions,
+/// used by the scheduler to determine process state transitions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionResult {
-    Continue,        // Continue execution
-    Yield,           // Process yielded voluntarily
-    BudgetExhausted, // Reduction budget exhausted
-    Blocked,         // Process blocked (e.g., waiting for message)
-    Exited(Value),   // Process exited with return value
-    Error(String),   // Execution error
+    /// Continue execution in the same process
+    Continue,
+    /// Pass control to the next process in the run queue
+    Pass,
+    /// Process has exhausted its reduction budget and should be preempted
+    BudgetExhausted,
+    /// Process is blocked (e.g., waiting for message) and cannot continue
+    Blocked,
+    /// Process is linked to another process and waiting
+    Linked,
+    /// Process has exited with the given return value
+    Exited(Value),
+    /// Execution error occurred
+    Error(String),
 }
 
+/// IonVM instruction set
+/// 
+/// This enum defines all available instructions in the IonVM. The VM uses a register-based
+/// architecture where instructions operate on numbered registers within each process frame.
+/// 
+/// # Register Architecture
+/// 
+/// Instructions use register indices to reference values. Each function has a set of registers
+/// determined by its arity (parameters) plus extra registers for local computation.
+/// 
+/// # Instruction Categories
+/// 
+/// - **Memory**: Load constants, move values between registers
+/// - **Arithmetic**: Mathematical operations supporting numbers and complex numbers  
+/// - **Object**: Create and manipulate prototype-based objects
+/// - **Control Flow**: Jumps, function calls, returns
+/// - **Actor**: Process spawning, message passing, timeouts
+/// - **Pattern Matching**: Structural pattern matching with jumps
 #[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// Create an object with a list of (key, value) pairs, where value can be a register or a constant value
-    ObjectInit(usize, Vec<(String, crate::value::ObjectInitArg)>), // dst, [(key, value/register)]
-    LoadConst(usize, Value),                 // reg, value
-    Move(usize, usize),                      // dst, src
-    Add(usize, usize, usize),                // dst, a, b
-    Sub(usize, usize, usize),                // dst, a, b
-    Mul(usize, usize, usize),                // dst, a, b
-    Div(usize, usize, usize),                // dst, a, b
-    GetProp(usize, usize, usize),            // dst, obj, key
-    SetProp(usize, usize, usize),            // obj, key, value
-    Call(usize, usize, Vec<usize>),          // dst, func, args
-    Return(usize),                           // reg
-    Jump(isize),                             // offset
-    JumpIfTrue(usize, isize),                // cond_reg, offset
-    JumpIfFalse(usize, isize),               // cond_reg, offset
-    Spawn(usize, usize, Vec<usize>),         // dst, func, args
-    Send(usize, usize),                      // proc, msg
-    Receive(usize),                          // dst
-    ReceiveWithTimeout(usize, usize, usize), // dst, timeout_reg, result_reg
-    Link(usize),                             // proc
-    Match(usize, Vec<(Pattern, isize)>),     // src, pattern table (pattern, jump offset)
-    Yield,                                   // Explicit yield point
+    /// 
+    /// Creates a new object with the specified properties. Each property can be defined
+    /// with custom flags (writable, enumerable, configurable).
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store the created object
+    /// - `kvs`: Vector of (key, ObjectInitArg) pairs defining object properties
+    ObjectInit(usize, Vec<(String, crate::value::ObjectInitArg)>),
+    
+    /// Load a constant value into a register
+    /// 
+    /// # Arguments  
+    /// - `reg`: Target register index
+    /// - `value`: Value to load (resolved at runtime for special values like __vm:self)
+    LoadConst(usize, Value),
+    
+    /// Move value from source register to destination register
+    /// 
+    /// # Arguments
+    /// - `dst`: Destination register
+    /// - `src`: Source register  
+    Move(usize, usize),
+    
+    /// Add two values and store result
+    /// 
+    /// Supports addition of numbers, complex numbers, and string concatenation.
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store result
+    /// - `a`: First operand register
+    /// - `b`: Second operand register
+    Add(usize, usize, usize),
+    
+    /// Subtract second value from first and store result
+    /// 
+    /// # Arguments  
+    /// - `dst`: Register to store result
+    /// - `a`: First operand register (minuend)
+    /// - `b`: Second operand register (subtrahend)
+    Sub(usize, usize, usize),
+    
+    /// Multiply two values and store result
+    /// 
+    /// Supports multiplication of numbers, complex numbers, and string repetition.
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store result  
+    /// - `a`: First operand register
+    /// - `b`: Second operand register
+    Mul(usize, usize, usize),
+    
+    /// Divide first value by second and store result
+    /// 
+    /// Returns Undefined if division by zero occurs.
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store result
+    /// - `a`: Dividend register  
+    /// - `b`: Divisor register
+    Div(usize, usize, usize),
+    
+    /// Get property from object
+    /// 
+    /// Retrieves a property from an object, traversing the prototype chain if necessary.
+    /// If the property value is a function, it will be bound to the object.
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store property value
+    /// - `obj`: Register containing object
+    /// - `key`: Register containing property key (must be Atom)
+    GetProp(usize, usize, usize),
+    
+    /// Set property on object
+    /// 
+    /// Sets a property on an object, respecting property descriptor flags.
+    /// 
+    /// # Arguments
+    /// - `obj`: Register containing object
+    /// - `key`: Register containing property key (must be Atom)  
+    /// - `value`: Register containing value to set
+    SetProp(usize, usize, usize),
+    
+    /// Call a function and store return value
+    /// 
+    /// Calls a function (bytecode or FFI) with the specified arguments.
+    /// Creates a new frame for bytecode functions.
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store return value
+    /// - `func`: Register containing function to call
+    /// - `args`: Vector of register indices containing arguments
+    Call(usize, usize, Vec<usize>),
+    
+    /// Return from current function
+    /// 
+    /// Returns from the current function with the specified value.
+    /// If this is the main function, marks the process as exited.
+    /// 
+    /// # Arguments
+    /// - `reg`: Register containing return value
+    Return(usize),
+    
+    /// Unconditional jump
+    /// 
+    /// # Arguments
+    /// - `offset`: Signed offset from current instruction pointer
+    Jump(isize),
+    
+    /// Conditional jump if value is truthy
+    /// 
+    /// # Arguments  
+    /// - `cond_reg`: Register containing condition value
+    /// - `offset`: Signed offset from current instruction pointer
+    JumpIfTrue(usize, isize),
+    
+    /// Conditional jump if value is falsy
+    /// 
+    /// # Arguments
+    /// - `cond_reg`: Register containing condition value  
+    /// - `offset`: Signed offset from current instruction pointer
+    JumpIfFalse(usize, isize),
+    
+    /// Spawn a new process
+    /// 
+    /// Creates a new process running the specified function with given arguments.
+    /// The new process is added to the run queue.
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store process reference
+    /// - `func`: Register containing function to spawn
+    /// - `args`: Vector of register indices containing arguments
+    Spawn(usize, usize, Vec<usize>),
+    
+    /// Send message to process
+    /// 
+    /// Sends a message to the specified process's mailbox.
+    /// If the process is blocked waiting for a message, it will be unblocked.
+    /// 
+    /// # Arguments
+    /// - `proc`: Register containing target process
+    /// - `msg`: Register containing message to send
+    Send(usize, usize),
+    
+    /// Blocking receive message
+    /// 
+    /// Receives a message from the current process's mailbox.
+    /// If no message is available, the process blocks until one arrives.
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store received message
+    Receive(usize),
+    
+    /// Receive message with timeout
+    /// 
+    /// Receives a message from the mailbox with a timeout.
+    /// If a message arrives before timeout, stores it and sets result to true.
+    /// If timeout expires, sets result to false.
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store received message
+    /// - `timeout_reg`: Register containing timeout in milliseconds
+    /// - `result_reg`: Register to store timeout result (boolean)
+    ReceiveWithTimeout(usize, usize, usize),
+    
+    /// Link to process and wait for completion
+    /// 
+    /// Blocks current process until the specified process completes,
+    /// then stores its return value.
+    /// 
+    /// # Arguments
+    /// - `proc_id`: Process ID to link to
+    /// - `proc_return_value`: Register to store return value
+    Link(usize, usize),
+    
+    /// Pattern matching with jump table
+    /// 
+    /// Matches the source value against a series of patterns.
+    /// Jumps to the offset of the first matching pattern.
+    /// 
+    /// # Arguments
+    /// - `src`: Register containing value to match
+    /// - `patterns`: Vector of (Pattern, jump_offset) pairs
+    Match(usize, Vec<(Pattern, isize)>),
+    
+    /// Explicit yield point for generators (not yet implemented)
+    Yield,
+    
+    /// No operation
     Nop,
+    
     // Comparison operations
-    Equal(usize, usize, usize),        // dst, a, b - equality comparison
-    NotEqual(usize, usize, usize),     // dst, a, b - inequality comparison
-    LessThan(usize, usize, usize),     // dst, a, b - less than comparison
-    LessEqual(usize, usize, usize),    // dst, a, b - less than or equal
-    GreaterThan(usize, usize, usize),  // dst, a, b - greater than comparison
-    GreaterEqual(usize, usize, usize), // dst, a, b - greater than or equal
+    /// Equality comparison
+    Equal(usize, usize, usize),
+    /// Inequality comparison  
+    NotEqual(usize, usize, usize),
+    /// Less than comparison
+    LessThan(usize, usize, usize),
+    /// Less than or equal comparison
+    LessEqual(usize, usize, usize),
+    /// Greater than comparison
+    GreaterThan(usize, usize, usize),
+    /// Greater than or equal comparison
+    GreaterEqual(usize, usize, usize),
+    
     // Logical operations
-    And(usize, usize, usize), // dst, a, b - logical AND
-    Or(usize, usize, usize),  // dst, a, b - logical OR
-    Not(usize, usize),        // dst, src - logical NOT
+    /// Logical AND operation
+    And(usize, usize, usize),
+    /// Logical OR operation
+    Or(usize, usize, usize),
+    /// Logical NOT operation
+    Not(usize, usize),
+    
+    /// Wait for first process to complete and store its return value
+    /// 
+    /// # Arguments
+    /// - `dst`: Register to store return value of first completing process
+    /// - `pids`: Vector of process IDs to wait for
+    Select(usize, Vec<usize>),
+    
+    /// Wait for first process to complete, kill others, store return value
+    /// 
+    /// # Arguments  
+    /// - `dst`: Register to store return value of first completing process
+    /// - `pids`: Vector of process IDs to wait for
+    SelectWithKill(usize, Vec<usize>),
 }
 
+/// Pattern types for pattern matching
+/// 
+/// Patterns are used in Match instructions to destructure and match against values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
+    /// Match a specific value exactly
     Value(Value),
+    /// Match any value (wildcard)
     Wildcard,
+    /// Match a tuple with the given sub-patterns
     Tuple(Vec<Pattern>),
+    /// Match an array with the given sub-patterns
     Array(Vec<Pattern>),
+    /// Match a tagged enum with the given tag and sub-pattern
     TaggedEnum(String, Box<Pattern>),
 }
 
+/// Call frame for function execution
+/// 
+/// Each function call creates a new frame on the process's frame stack.
+/// Frames contain the execution state for a particular function invocation.
 #[derive(Debug)]
 pub struct Frame {
+    /// Register values for this frame
     pub registers: Vec<Value>,
+    /// Stack for intermediate values (currently unused in register-based design)
     pub stack: Vec<Value>,
+    /// Instruction pointer - current position in bytecode
     pub ip: usize,
+    /// Function being executed in this frame
     pub function: Rc<Function>,
+    /// Return value set by Return instruction
     pub return_value: Option<Value>,
-    pub caller_return_reg: Option<usize>, // Where to store return value in caller
+    /// Where to store return value in caller's frame (if any)
+    pub caller_return_reg: Option<usize>,
 }
 
+/// IonVM - Actor Model Virtual Machine
+/// 
+/// The main virtual machine implementing the actor model with preemptive scheduling.
+/// Manages multiple lightweight processes that communicate via message passing.
+/// 
+/// # Architecture
+/// 
+/// - **Processes**: Lightweight actors with individual mailboxes and execution state
+/// - **Scheduler**: Preemptive round-robin scheduler with configurable timeslice
+/// - **Reduction Counting**: Budget-based execution to ensure fairness
+/// - **Message Passing**: Asynchronous communication between processes
+/// - **FFI Integration**: Bridge to native Rust functions
+/// 
+/// # Example
+/// 
+/// ```rust
+/// use vmm::{IonVM, Function, Instruction, Value, Primitive};
+/// use std::rc::Rc;
+/// 
+/// let mut vm = IonVM::new();
+/// 
+/// let function = Function::new_bytecode(
+///     Some("test".to_string()),
+///     0, 1,
+///     vec![
+///         Instruction::LoadConst(0, Value::Primitive(Primitive::Number(42.0))),
+///         Instruction::Return(0),
+///     ]
+/// );
+/// 
+/// let result = vm.spawn_main_process(function).unwrap();
+/// ```
 pub struct IonVM {
+    /// All processes indexed by PID
     pub processes: HashMap<usize, Rc<RefCell<crate::value::Process>>>,
+    /// Queue of runnable process IDs
     pub run_queue: VecDeque<usize>,
+    /// Next process ID to assign
     pub next_pid: usize,
+    /// Maximum reductions per process (unused - using timeslice instead)
     pub reduction_limit: u32,
-    pub timeslice: u32, // Number of instructions per process before preemption
+    /// Number of instructions per process before preemption
+    pub timeslice: u32,
+    /// Total number of scheduler passes executed
     pub scheduler_passes: u64,
+    /// Registry of FFI functions
     pub ffi_registry: FfiRegistry,
-    stdlib_functions: Option<HashMap<String, Value>>, // For stdlib function references
-    pub debug: bool,                                  // Enable debug output
-    pending_timeouts: Vec<TimeoutInfo>,               // Track pending timeout operations
+    /// Standard library function cache (currently unused)
+    stdlib_functions: Option<HashMap<String, Value>>,
+    /// Enable debug output during execution
+    pub debug: bool,
+    /// Pending timeout operations
+    pending_timeouts: Vec<TimeoutInfo>,
 }
 
 impl IonVM {
@@ -514,8 +804,9 @@ impl IonVM {
                     }
                     // Continue to next instruction
                 }
-                ExecutionResult::Yield => {
-                    return ExecutionResult::Yield;
+                ExecutionResult::Pass => {
+                    // Pass to next process
+                    return ExecutionResult::Pass;
                 }
                 ExecutionResult::Blocked => {
                     // For blocked instructions, revert IP advancement so we retry
@@ -1178,6 +1469,7 @@ impl IonVM {
                                                     format!("Error: {}", err_msg),
                                                 ));
                                         }
+                                        FfiCallResult::Yield(_) => todo!("Handle FFI yield properly"),
                                     }
                                 }
 
@@ -1223,7 +1515,7 @@ impl IonVM {
                 }
             }
 
-            Instruction::Yield => ExecutionResult::Yield,
+            Instruction::Yield => todo!("Generators"),
 
             Instruction::Spawn(dst_reg, func_reg, arg_regs) => {
                 // First, collect the function and arguments
@@ -1385,37 +1677,42 @@ impl IonVM {
                 }
             }
 
-            Instruction::Link(proc_reg) => {
-                let target_proc = {
-                    let frame = proc.frames.last().unwrap();
-                    frame.registers[proc_reg].clone()
-                };
-
-                match target_proc {
-                    Value::Process(target_proc_rc) => {
-                        let current_pid = proc.pid;
-                        let target_pid = target_proc_rc.borrow().pid;
-
-                        // Create bidirectional link
-                        // Add target to current process's links
-                        if !proc.links.contains(&target_pid) {
-                            proc.links.push(target_pid);
+            Instruction::Link(proc_id, proc_ret_val) => {
+                // block self execution till the process with proc_id ends, and then
+                if let Some(target_proc) = self.processes.get(&proc_id) {
+                    // Wait for the target process to finish
+                    let target_proc = target_proc.borrow();
+                    if target_proc.status == ProcessStatus::Exited {
+                        // If the target process has already exited, we can just return its value
+                        if let Some(frame) = proc.frames.last_mut() {
+                            frame.registers[proc_ret_val] =
+                                target_proc.last_result.clone().unwrap_or(Value::Primitive(
+                                    crate::value::Primitive::Undefined,
+                                ));
+                            if self.debug {
+                                println!(
+                                    "[VM DEBUG] LINK: Process {} already exited, returning value {:?} to r{}",
+                                    proc_id, frame.registers[proc_ret_val], proc_ret_val
+                                );
+                            }
                         }
-
-                        // Add current to target process's links
-                        let mut target_proc_borrow = target_proc_rc.borrow_mut();
-                        if !target_proc_borrow.links.contains(&current_pid) {
-                            target_proc_borrow.links.push(current_pid);
-                        }
-
-                        ExecutionResult::Continue
-                    }
-
-                    _ => {
-                        // Not a process - can't link
-                        ExecutionResult::Continue
+                        return ExecutionResult::Continue;
                     }
                 }
+                else {
+                    return ExecutionResult::Error(format!(
+                        "Link target process {} not found",
+                        proc_id
+                    ));
+                }
+                if self.debug {
+                    println!(
+                        "[VM DEBUG] LINK: Process {} linked to process {} with return value register {}",
+                        proc.pid, proc_id, proc_ret_val
+                    );
+                }
+                ExecutionResult::Blocked
+
             }
 
             Instruction::Match(src_reg, patterns) => {
@@ -1656,6 +1953,102 @@ impl IonVM {
                 }
                 ExecutionResult::Continue
             }
+
+            Instruction::Select(dst_reg, pid_regs) => {
+                let pids = pid_regs
+                    .iter()
+                    .filter_map(|&reg| {
+                        if let Value::Process(proc_ref) = &proc.frames.last().unwrap().registers[reg] {
+                            Some(proc_ref.borrow().pid)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if pids.is_empty() {
+                    return ExecutionResult::Error("No valid process IDs provided for select".to_string());
+                }
+                if self.debug {
+                    println!(
+                        "[VM DEBUG] SELECT: Waiting for earliest process in {:?} to finish",
+                        pids
+                    );
+                }
+                for pid in &pids {
+                    if let Some(proc_ref) = self.processes.get(pid) {
+                        let procr = proc_ref.borrow();
+                        if procr.status == ProcessStatus::Exited {
+                            // If any process has already exited, we can return its value immediately
+                            if let Some(val) = &procr.last_result {
+                                proc.frames.last_mut().unwrap().registers[dst_reg] = val.clone();
+                                return ExecutionResult::Continue;
+                            }
+                        }
+                    }
+                }
+                ExecutionResult::Linked
+            }
+
+            Instruction::SelectWithKill(dst_reg, pid_regs) => {
+                let pids = pid_regs
+                    .iter()
+                    .filter_map(|&reg| {
+                        if let Value::Process(proc_ref) = &proc.frames.last().unwrap().registers[reg] {
+                            Some(proc_ref.borrow().pid)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if pids.is_empty() {
+                    return ExecutionResult::Error("No valid process IDs provided for select".to_string());
+                }
+                if self.debug {
+                    println!(
+                        "[VM DEBUG] SELECT: Waiting for earliest process in {:?} to finish",
+                        pids
+                    );
+                }
+                let mut retproc = None;
+                for pid in &pids {
+                    if let Some(proc_ref) = self.processes.get(pid) {
+                        let procr = proc_ref.borrow();
+                        if procr.status == ProcessStatus::Exited {
+                            // If any process has already exited, we can return its value immediately
+                            retproc = Some(procr.pid);
+                            if let Some(val) = &procr.last_result {
+                                if self.debug {
+                                    println!(
+                                        "[VM DEBUG] SELECT: Process {} already exited, returning value {:?} to r{}",
+                                        pid, val, dst_reg
+                                    );
+                                }
+                                proc.frames.last_mut().unwrap().registers[dst_reg] = val.clone();
+                            }
+                            break;
+                        }
+                    }
+                }
+                if let Some(retproc) = retproc {
+                    // Kill all other processes
+                    for pid in &pids {
+                        if let Some(proc_ref) = self.processes.get(pid) {
+                            if proc_ref.borrow().pid != retproc {
+                                // Kill this process
+                                proc_ref.borrow_mut().alive = false;
+                                proc_ref.borrow_mut().status = ProcessStatus::Exited;
+                                if self.debug {
+                                    println!(
+                                        "[VM DEBUG] SELECT: Killing process {}",
+                                        pid
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                ExecutionResult::Linked
+            }
         }
     }
 
@@ -1708,7 +2101,7 @@ impl IonVM {
     /// Handle the result of process execution
     fn handle_execution_result(&mut self, pid: usize, result: ExecutionResult) {
         match result {
-            ExecutionResult::BudgetExhausted | ExecutionResult::Yield => {
+            ExecutionResult::BudgetExhausted  => {
                 // Reschedule process
                 self.run_queue.push_back(pid);
             }
@@ -1741,9 +2134,15 @@ impl IonVM {
                 // Don't reschedule
             }
 
-            ExecutionResult::Continue => {
+            ExecutionResult::Continue | ExecutionResult::Pass => {
                 // This shouldn't happen at the top level
                 self.run_queue.push_back(pid);
+            }
+            ExecutionResult::Linked => {
+                // Process is linked to another process, wait for it to finish
+                if let Some(proc_ref) = self.processes.get(&pid) {
+                    proc_ref.borrow_mut().status = ProcessStatus::Suspended;
+                }
             }
         }
     }

@@ -120,6 +120,7 @@ impl FromFfiValue for Value {
 pub enum FfiCallResult {
     Success(Value),
     Error(String),
+    Yield(Value), // Used for iterators
 }
 
 /// Helper function to call an FFI function with VM values

@@ -1,3 +1,38 @@
+//! # IonVM - Actor Model Virtual Machine
+//! 
+//! IonVM is a research virtual machine implementing the actor model of computation with support for 
+//! prototype-based objects, message passing, and preemptive scheduling.
+//! 
+//! ## Quick Start
+//! 
+//! ```rust
+//! use vmm::{IonVM, Function, Instruction, Value, Primitive};
+//! use std::rc::Rc;
+//! 
+//! let mut vm = IonVM::new();
+//! 
+//! // Create a simple function that returns 42
+//! let function = Function::new_bytecode(
+//!     Some("main".to_string()),
+//!     0, // arity
+//!     1, // extra registers
+//!     vec![
+//!         Instruction::LoadConst(0, Value::Primitive(Primitive::Number(42.0))),
+//!         Instruction::Return(0),
+//!     ],
+//! );
+//! 
+//! let result = vm.spawn_main_process(function).unwrap();
+//! ```
+//! 
+//! ## Features
+//! 
+//! - **Actor Model**: Lightweight processes with message passing
+//! - **Preemptive Scheduling**: Fair, configurable timeslice-based scheduling  
+//! - **Prototype Objects**: Dynamic objects with property descriptors
+//! - **FFI Integration**: Bridge to native Rust functions
+//! - **IonPack Format**: ZIP-based packaging for distribution
+
 pub mod bytecode_binary;
 pub mod bytecode_text;
 pub mod ffi_integration;
