@@ -71,8 +71,8 @@ fn test_object_prototype_system() {
         PropertyDescriptor {
             value: Value::Primitive(Primitive::Atom("inherited".to_string())),
             writable: false,
-            enumerable: true,
-            configurable: false,
+            enumerable: false,
+            configurable: true,
         },
     );
     let prototype_rc = Rc::new(RefCell::new(prototype));
@@ -84,7 +84,7 @@ fn test_object_prototype_system() {
         PropertyDescriptor {
             value: Value::Primitive(Primitive::Number(42.0)),
             writable: true,
-            enumerable: true,
+            enumerable: false,
             configurable: true,
         },
     );

@@ -65,7 +65,7 @@ impl FromFfiValue for Value {
             FfiValue::Number(n) => Ok(Value::Primitive(Primitive::Number(n))),
             FfiValue::Boolean(b) => Ok(Value::Primitive(Primitive::Boolean(b))),
             FfiValue::Atom(s) => Ok(Value::Primitive(Primitive::Atom(s))),
-            FfiValue::String(s) => Ok(Value::Primitive(Primitive::Atom(s))),
+            FfiValue::String(s) => Ok(Value::Primitive(Primitive::String(s))),
             FfiValue::Complex(c) => Ok(Value::Primitive(Primitive::Complex(c))),
             FfiValue::Unit => Ok(Value::Primitive(Primitive::Unit)),
             FfiValue::Undefined => Ok(Value::Primitive(Primitive::Undefined)),
@@ -229,7 +229,7 @@ mod tests {
     fn test_string_functions() {
         let registry = FfiRegistry::with_stdlib();
 
-        let args = vec![Value::Primitive(Primitive::Atom("hello world".to_string()))];
+        let args = vec![Value::Primitive(Primitive::String("hello world".to_string()))];
 
         let result = call_ffi_function(&registry, "StrLength", args);
 

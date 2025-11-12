@@ -2370,7 +2370,7 @@ mod tests {
             PropertyDescriptor {
                 value: Value::Primitive(Primitive::Number(42.0)),
                 writable: true,
-                enumerable: true,
+                enumerable: false,
                 configurable: true,
             },
         );
@@ -2622,7 +2622,7 @@ fn test_bound_this_method_call() {
         PropertyDescriptor {
             value: Value::Function(Rc::new(RefCell::new((*method_func).clone()))),
             writable: true,
-            enumerable: true,
+            enumerable: false,
             configurable: true,
         },
     );
@@ -2631,7 +2631,7 @@ fn test_bound_this_method_call() {
         PropertyDescriptor {
             value: Value::Primitive(Primitive::String("TestObject".to_string())),
             writable: true,
-            enumerable: true,
+            enumerable: false,
             configurable: true
         }
     );

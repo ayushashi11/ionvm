@@ -524,20 +524,20 @@ mod extra_regs_tests {
                     vec![
                         (
                             "foo".to_string(),
-                            ObjectInitArg::RegisterWithFlags(1, true, true, true),
+                            ObjectInitArg::RegisterWithFlags(1, true, false, true),
                         ),
                         (
                             "bar".to_string(),
                             ObjectInitArg::ValueWithFlags(
                                 Value::Primitive(Primitive::Number(42.0)),
                                 true,
-                                true,
+                                false,
                                 true,
                             ),
                         ),
                         (
                             "baz".to_string(),
-                            ObjectInitArg::RegisterWithFlags(2, true, true, true),
+                            ObjectInitArg::RegisterWithFlags(2, true, false, true),
                         ),
                     ],
                 ),
