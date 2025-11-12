@@ -36,7 +36,6 @@ IonVM is a research virtual machine and toolchain for actor-model concurrency, m
   - `src/bin/iondis.rs` — Disassembler for IonPack bytecode
   - `src/vm_timeout_tests.rs` — Receive-with-timeout and process wakeup tests
 - `python-ionvm/` — Python FFI bindings and examples
-- `examples/` — Example IonPack and Python actor programs
 - `target/` — Build artifacts
 
 ## Key Concepts
@@ -131,4 +130,3 @@ MIT or Apache 2.0 (choose your preferred license).
 
 ## Authors
 IonVM Developer and contributors.
-</edits>
