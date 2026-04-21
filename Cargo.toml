@@ -1,5 +1,5 @@
 [workspace]
-members = ["vmm", "vm-ffi"]
+members = ["vmm", "vm-ffi", "python-ionvm"]
 resolver = "2"
 
 [workspace.dependencies]

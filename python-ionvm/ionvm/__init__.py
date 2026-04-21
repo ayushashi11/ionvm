@@ -7,14 +7,14 @@ with support for prototype-based objects and preemptive scheduling.
 
 This library enables you to:
 - Generate IonVM bytecode instructions
-- Create and manipulate IonVM values  
+- Create and manipulate IonVM values
 - Build IonPack archive files for distribution
 - Construct control flow patterns
 - Work with pattern matching
 
 Quick Start:
     >>> from ionvm import Function, Instruction, Value, IonPackBuilder
-    >>> 
+    >>>
     >>> # Create a simple function
     >>> function = Function(
     ...     name="main",
@@ -25,19 +25,19 @@ Quick Start:
     ...         Instruction.return_reg(0)
     ...     ]
     ... )
-    >>> 
+    >>>
     >>> # Create an IonPack
     >>> builder = IonPackBuilder("hello-world", "1.0.0")
     >>> builder.main_class("Main")
     >>> builder.entry_point("main")
     >>> builder.add_class("Main", function)
-    >>> 
+    >>>
     >>> with open("hello.ionpack", "wb") as f:
     ...     builder.build(f)
 
 Architecture:
     The library mirrors the structure of the IonVM:
-    
+
     - Values: Represent IonVM data types (numbers, strings, objects, etc.)
     - Instructions: VM operations (arithmetic, control flow, actor operations)
     - Functions: Collections of instructions with metadata
@@ -45,20 +45,15 @@ Architecture:
     - Patterns: Structural pattern matching support
 """
 
+from ionvm_rust import Function, Instruction, IonPackBuilder, Pattern, Value
 
-from .value import Value
-from .instruction import Instruction
-from .function import Function
-from .bytecode import BytecodeWriter
-from .ionpack import IonPackBuilder, Manifest
-from .pattern import Pattern
 from .control_flow import (
-    IfElseBuilder, 
+    IfElseBuilder,
     WhileThenElseBuilder,
-    build_if_else, 
+    build_if_else,
     build_while_then_else,
     create_break_instruction,
-    create_continue_instruction
+    create_continue_instruction,
 )
 
 __version__ = "0.1.0"
@@ -67,11 +62,9 @@ __license__ = "MIT"
 
 __all__ = [
     "Value",
-    "Instruction", 
+    "Instruction",
     "Function",
-    "BytecodeWriter",
     "IonPackBuilder",
-    "Manifest",
     "Pattern",
     "IfElseBuilder",
     "WhileThenElseBuilder",

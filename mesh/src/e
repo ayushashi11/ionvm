@@ -1,0 +1,14 @@
+enum Shape:
+    Circle(Float)
+    Rect(Float, Float)
+    Line
+
+enum Result[T]:
+    Ok(T)
+    Err
+
+fn area(s Shape) -> Result[Float]:
+    match s:
+        :Circle(r) => :Ok(r * r)
+        :Rect(w, h) => :Ok(w * h)
+        _ => :Err

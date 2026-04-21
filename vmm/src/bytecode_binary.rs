@@ -5,7 +5,7 @@
 
 use num_complex::Complex64;
 
-use crate::value::{Function, FunctionType, Primitive, Value};
+use crate::value::{Function, FunctionType, Primitive, PropertyAccess, Value};
 use crate::vm::{Instruction, Pattern};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -85,7 +85,9 @@ enum Opcode {
     ReceiveWithTimeout = 0x1E,
     ObjectInit = 0x1F,
     Select = 0x20,
-    SelectWithKill = 0x21, 
+    SelectWithKill = 0x21,
+    ArrayInit = 0x22,
+    MakeClosure = 0x23,
 }
 
 impl TryFrom<u8> for Opcode {
@@ -126,11 +128,12 @@ impl TryFrom<u8> for Opcode {
             0x1F => Ok(Opcode::ObjectInit),
             0x20 => Ok(Opcode::Select),
             0x21 => Ok(Opcode::SelectWithKill),
+            0x22 => Ok(Opcode::ArrayInit),
+            0x23 => Ok(Opcode::MakeClosure),
             _ => Err(BytecodeError::InvalidOpcode(value)),
         }
     }
 }
-
 /// Value type tags for serialization
 #[repr(u8)]
 enum ValueTag {
@@ -234,9 +237,7 @@ impl<W: Write> BinaryWriter<W> {
                 for (key, prop) in &obj_borrow.properties {
                     self.write_string(key)?;
                     self.write_value(&prop.value)?;
-                    self.write_u8(if prop.writable { 1 } else { 0 })?;
-                    self.write_u8(if prop.enumerable { 1 } else { 0 })?;
-                    self.write_u8(if prop.configurable { 1 } else { 0 })?;
+                    self.write_u8(prop.access.to_byte())?;
                 }
             }
             Value::Function(func) => {
@@ -347,19 +348,15 @@ impl<W: Write> BinaryWriter<W> {
                             self.write_u8(1)?; // tag for Value
                             self.write_value(val)?;
                         }
-                        crate::value::ObjectInitArg::RegisterWithFlags(reg, w, e, c) => {
+                        crate::value::ObjectInitArg::RegisterWithAccess(reg, access) => {
                             self.write_u8(2)?; // tag for RegisterWithFlags
                             self.write_u32(*reg as u32)?;
-                            self.write_u8(if *w { 1 } else { 0 })?;
-                            self.write_u8(if *e { 1 } else { 0 })?;
-                            self.write_u8(if *c { 1 } else { 0 })?;
+                            self.write_u8(access.to_byte())?;
                         }
-                        crate::value::ObjectInitArg::ValueWithFlags(val, w, e, c) => {
+                        crate::value::ObjectInitArg::ValueWithAccess(val, access) => {
                             self.write_u8(3)?; // tag for ValueWithFlags
                             self.write_value(val)?;
-                            self.write_u8(if *w { 1 } else { 0 })?;
-                            self.write_u8(if *e { 1 } else { 0 })?;
-                            self.write_u8(if *c { 1 } else { 0 })?;
+                            self.write_u8(access.to_byte())?;
                         }
                     }
                 }
@@ -407,6 +404,17 @@ impl<W: Write> BinaryWriter<W> {
                 self.write_u32(args.len() as u32)?;
                 for arg in args {
                     self.write_u32(*arg as u32)?;
+                }
+            }
+            Instruction::MakeClosure(dst, func, scope_id, captures) => {
+                self.write_u8(Opcode::MakeClosure as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(*func as u32)?;
+                self.write_string(scope_id)?;
+                self.write_u32(captures.len() as u32)?;
+                for (name, reg) in captures {
+                    self.write_string(name)?;
+                    self.write_u32(*reg as u32)?;
                 }
             }
             Instruction::Spawn(dst, func, args) => {
@@ -518,6 +526,14 @@ impl<W: Write> BinaryWriter<W> {
                     self.write_u32(*pid as u32)?;
                 }
             }
+            Instruction::ArrayInit(dst, srcs) => {
+                self.write_u8(Opcode::ArrayInit as u8)?;
+                self.write_u32(*dst as u32)?;
+                self.write_u32(srcs.len() as u32)?;
+                for src in srcs {
+                    self.write_u32(*src as u32)?;
+                }
+            }
         }
         Ok(())
     }
@@ -622,19 +638,10 @@ impl<R: Read> BinaryReader<R> {
                 for _ in 0..len {
                     let key = self.read_string()?;
                     let value = self.read_value()?;
-                    let writable = self.read_u8()? != 0;
-                    let enumerable = self.read_u8()? != 0;
-                    let configurable = self.read_u8()? != 0;
+                    let access = PropertyAccess::from_byte(self.read_u8()?).unwrap();
 
-                    obj.properties.insert(
-                        key,
-                        PropertyDescriptor {
-                            value,
-                            writable,
-                            enumerable,
-                            configurable,
-                        },
-                    );
+                    obj.properties
+                        .insert(key, PropertyDescriptor { value, access });
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(obj))))
             }
@@ -753,17 +760,13 @@ impl<R: Read> BinaryReader<R> {
                         }
                         2 => {
                             let reg = self.read_u32()? as usize;
-                            let w = self.read_u8()? != 0;
-                            let e = self.read_u8()? != 0;
-                            let c = self.read_u8()? != 0;
-                            crate::value::ObjectInitArg::RegisterWithFlags(reg, w, e, c)
+                            let access = PropertyAccess::from_byte(self.read_u8()?).unwrap();
+                            crate::value::ObjectInitArg::RegisterWithAccess(reg, access)
                         }
                         3 => {
                             let val = self.read_value()?;
-                            let w = self.read_u8()? != 0;
-                            let e = self.read_u8()? != 0;
-                            let c = self.read_u8()? != 0;
-                            crate::value::ObjectInitArg::ValueWithFlags(val, w, e, c)
+                            let access = PropertyAccess::from_byte(self.read_u8()?).unwrap();
+                            crate::value::ObjectInitArg::ValueWithAccess(val, access)
                         }
                         _ => {
                             return Err(BytecodeError::InvalidFormat(
@@ -816,6 +819,19 @@ impl<R: Read> BinaryReader<R> {
                     args.push(self.read_u32()? as usize);
                 }
                 Ok(Instruction::Call(dst, func, args))
+            }
+            Opcode::MakeClosure => {
+                let dst = self.read_u32()? as usize;
+                let func = self.read_u32()? as usize;
+                let scope_id = self.read_string()?;
+                let count = self.read_u32()? as usize;
+                let mut captures = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let name = self.read_string()?;
+                    let reg = self.read_u32()? as usize;
+                    captures.push((name, reg));
+                }
+                Ok(Instruction::MakeClosure(dst, func, scope_id, captures))
             }
             Opcode::Spawn => {
                 let dst = self.read_u32()? as usize;
@@ -931,6 +947,15 @@ impl<R: Read> BinaryReader<R> {
                 }
                 Ok(Instruction::SelectWithKill(dst, pids))
             }
+            Opcode::ArrayInit => {
+                let dst = self.read_u32()? as usize;
+                let count = self.read_u32()? as usize;
+                let mut srcs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    srcs.push(self.read_u32()? as usize);
+                }
+                Ok(Instruction::ArrayInit(dst, srcs))
+            }
         }
     }
 
@@ -1011,7 +1036,9 @@ impl<R: Read> BinaryReader<R> {
             arity,
             extra_regs,
             function_type,
-            bound_this: None
+            bound_this: None,
+            closure_env: None,
+            capture_order: Vec::new(),
         })
     }
 }
@@ -1230,6 +1257,8 @@ pub fn deserialize_functions<R: Read>(mut reader: R) -> Result<Vec<Function>, By
             extra_regs,
             function_type,
             bound_this: None, // No bound_this in deserialized functions
+            closure_env: None,
+            capture_order: Vec::new(),
         });
     }
 
@@ -1332,6 +1361,8 @@ pub fn deserialize_function<R: Read>(mut reader: R) -> Result<Function, Bytecode
         extra_regs,
         function_type,
         bound_this: None, // No bound_this in deserialized functions
+        closure_env: None,
+        capture_order: Vec::new(),
     })
 }
 
@@ -1342,6 +1373,7 @@ pub fn deserialize_function_with_registry<R: Read>(
 ) -> Result<Function, BytecodeError> {
     // First, deserialize normally
     let mut function = Rc::new(RefCell::new(deserialize_function(reader)?));
+    dbg!(function.borrow().name.clone());
 
     // Then resolve any function references in the bytecode
     resolve_function_references(&mut function, function_registry);
@@ -1355,7 +1387,7 @@ pub fn resolve_function_references(
     function_registry: &HashMap<String, Rc<RefCell<Function>>>,
 ) {
     use crate::value::FunctionType;
-
+    let fname = function.borrow().name.clone();
     if let FunctionType::Bytecode { ref mut bytecode } = function.borrow_mut().function_type {
         for instruction in bytecode.iter_mut() {
             match instruction {
@@ -1363,32 +1395,30 @@ pub fn resolve_function_references(
                     // Check if this is a function name that needs to be resolved
                     if let Value::Primitive(Primitive::Atom(name)) = value {
                         if name.starts_with("__function_ref:") {
+                            // User-defined function reference
                             let function_name = &name[15..]; // Remove "__function_ref:" prefix
                             if let Some(resolved_function) = function_registry.get(function_name) {
                                 *value = Value::Function(Rc::clone(resolved_function));
                             }
                         } else if name.starts_with("__stdlib:") {
+                            // FFI function reference - handle all stdlib functions generically
                             let stdlib_name = &name[9..]; // Remove "__stdlib:" prefix
-                            // Create stdlib FFI function
-                            match stdlib_name {
-                                "debug" => {
-                                    let debug_fn = RefCell::new(Function::new_ffi(
-                                        Some("debug".to_string()),
-                                        1,
-                                        "Debug".to_string(), // Use the actual FFI function name
-                                    ));
-                                    *value = Value::Function(std::rc::Rc::new(debug_fn));
-                                }
-                                "print" => {
-                                    let print_fn = RefCell::new(Function::new_ffi(
-                                        Some("print".to_string()),
-                                        1,
-                                        "Print".to_string(), // Use the actual FFI function name
-                                    ));
-                                    *value = Value::Function(std::rc::Rc::new(print_fn));
-                                }
-                                _ => {} // Unknown stdlib function
-                            }
+                            // Create FFI function wrapper with the stdlib name
+                            // The FfiRegistry will validate the function exists when it's called
+                            let ffi_fn = Function::new_ffi(
+                                Some(stdlib_name.to_lowercase()),
+                                1, // Default arity; actual arity checked at call time
+                                stdlib_name.to_string(), // Pass the exact FFI function name
+                            );
+                            *value = Value::Function(Rc::new(RefCell::new(ffi_fn)));
+                        } else if name.starts_with("__type:") {
+                            // FFI type/object reference - format: __type:category:ClassName
+                            // For now, store as a special atom; future: create native object wrappers
+                            // This prevents panics on unknown type references
+                            // TODO: Implement proper FFI object creation with native backing
+                            // Once implemented, this would become:
+                            //   let obj = create_ffi_object(name);
+                            //   *value = obj;
                         }
                     }
                 }
@@ -1435,15 +1465,13 @@ mod tests {
         let kvs = vec![
             (
                 "foo".to_string(),
-                ObjectInitArg::RegisterWithFlags(1, true, false, true),
+                ObjectInitArg::RegisterWithAccess(1, PropertyAccess::Public),
             ),
             (
                 "bar".to_string(),
-                ObjectInitArg::ValueWithFlags(
+                ObjectInitArg::ValueWithAccess(
                     Value::Primitive(Primitive::Number(99.0)),
-                    false,
-                    true,
-                    false,
+                    PropertyAccess::Protected,
                 ),
             ),
         ];
@@ -1457,24 +1485,20 @@ mod tests {
             assert_eq!(*dst, 0);
             assert_eq!(out_kvs.len(), 2);
             match &out_kvs[0] {
-                (k, ObjectInitArg::RegisterWithFlags(reg, w, e, c)) => {
+                (k, ObjectInitArg::RegisterWithAccess(reg, access)) => {
                     assert_eq!(k, "foo");
                     assert_eq!(*reg, 1);
-                    assert_eq!(*w, true);
-                    assert_eq!(*e, false);
-                    assert_eq!(*c, true);
+                    assert_eq!(*access, PropertyAccess::Public);
                 }
                 _ => panic!("Expected RegisterWithFlags variant"),
             }
             match &out_kvs[1] {
-                (k, ObjectInitArg::ValueWithFlags(val, w, e, c)) => {
+                (k, ObjectInitArg::ValueWithAccess(val, access)) => {
                     assert_eq!(k, "bar");
                     assert!(
                         matches!(val, Value::Primitive(Primitive::Number(n)) if (*n - 99.0).abs() < 1e-8)
                     );
-                    assert_eq!(*w, false);
-                    assert_eq!(*e, true);
-                    assert_eq!(*c, false);
+                    assert_eq!(*access, PropertyAccess::Protected);
                 }
                 _ => panic!("Expected ValueWithFlags variant"),
             }
@@ -1485,7 +1509,6 @@ mod tests {
 
     #[test]
     fn test_function_serialization() {
-
         let function = Function::new_bytecode(
             Some("test_func".to_string()),
             2,

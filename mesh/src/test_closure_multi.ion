@@ -1,0 +1,26 @@
+// Test multiple closure captures
+
+// Test 1: Multiple captures
+const x = 10.0
+const y = 20.0
+const add_xy = fn(z Float):
+    x + y + z
+const r1 = add_xy(5.0)
+debug(r1)
+
+// Test 2: Higher-order function (returning a closure)
+const make_multiplier = fn(factor Float):
+    fn(value Float):
+        value * factor
+const double = make_multiplier(2.2)
+const r2 = double(10.1)
+debug(r2)
+
+// Test 3: Three captures
+const a = 1.0
+const b = 2.0
+const c = 3.0
+const sum_abc = fn(d Float):
+    a + b + c + d
+const r3 = sum_abc(4.0)
+debug(r3)

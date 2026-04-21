@@ -1,0 +1,12 @@
+fn inner_sqrt(x Float, guess Float, precision Float) -> Float:
+    if x < 0.0:
+        return -1.0
+    const diff = guess * guess - x
+    if abs(diff) > precision:
+        const nguess Float = (guess + x / guess) / 2.0
+        return inner_sqrt(x, nguess, precision)
+    return guess
+fn sqrt_n(x Float) -> Float:
+    return inner_sqrt(x, 1.0, 0.0000000000001)
+
+debug(round(sqrt_n(11.0)))

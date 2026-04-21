@@ -91,6 +91,12 @@ fn format_value(value: &FfiValue) -> String {
             format!("[{}]", items.join(", "))
         }
         FfiValue::Object(obj) => {
+            if obj.contains_key("__tag"){
+                let tag = obj.get("__tag").unwrap();
+                if let FfiValue::Atom(tag_str) = tag {
+                    return format!(":{}{}", tag_str, obj.iter().filter(|(k, _)| *k != "__tag").map(|(_, v)| format_value(v)).collect::<Vec<_>>().join(", "));
+                }
+            }
             let items: Vec<String> = obj
                 .iter()
                 .map(|(k, v)| format!("{}: {}", k, format_value(v)))

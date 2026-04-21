@@ -1,0 +1,31 @@
+// Test FFI bindings support
+
+// Test 1: Using FFI functions from bindings
+fn proc():
+    println("inside proc")
+    const dat = receive()
+    print("proc recievd", dat, "computing sqrt")
+    println("sqrt is", sqrt(dat))
+const p = spawn proc()
+const x = 42.0
+debug(x)
+const msg = "Hello from FFI"
+println(msg)
+
+// Test 2: String functions  
+const s = "test string"
+const len_result = StrLength(s)
+debug(len_result)
+
+const upper_result = StrUpper(s)
+debug(upper_result)
+
+// Test 3: Math functions
+send(p, 11.0)
+
+const abs_result = abs(-5.0)
+debug(abs_result)
+
+const max_result = max(20.691, 20.69)
+debug(max_result)
+

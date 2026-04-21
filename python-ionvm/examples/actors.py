@@ -39,7 +39,7 @@ def main():
             Instruction.call(17, 15, [16]),  # r17 = debug("worker")
             # Wait for result from worker
             Instruction.receive(16),  # r16 = receive() (should get 225 = 15*15)
-            
+            Instruction.call(17, 15, [16]),
             # Return the computed result
             Instruction.return_reg(16),
         ]

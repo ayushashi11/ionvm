@@ -1,0 +1,17 @@
+fn make_handlers(inp Int):
+    let x = inp
+    const steps = [
+        fn() -> Int:
+            x = x+1
+            x,
+        fn() -> Int:
+            x=x * 2
+            x,
+    ]
+    steps
+
+const funcs = make_handlers(10)
+const result1 = funcs[0]()
+debug(result1)
+const result2 = funcs[0]()
+debug(result2)
