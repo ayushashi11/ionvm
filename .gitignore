@@ -1,7 +1,13 @@
 /target
 *_old.rs
-*.lock
+**/*.lock
 *.pyc
 python-ionvm/build
 python-ionvm/ionvm.egg-info
 .vscode/settings.json
+*.ionc
+*.ionpack
+.codex
+.vscode/
+.gemini/**
+.venv/**

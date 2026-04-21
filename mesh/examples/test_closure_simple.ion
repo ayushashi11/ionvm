@@ -1,0 +1,7 @@
+// Simple closure capture test
+
+const x = 5.0
+const f = fn(y Float):
+    x + y
+const result = f(3.0)
+debug(result)

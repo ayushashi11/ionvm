@@ -1,5 +1,6 @@
 use crate::value::{Function, Primitive, Value};
 use crate::vm::{Instruction, IonVM};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
@@ -15,13 +16,8 @@ fn test_receive_with_timeout_sets_result_false() {
         Instruction::ReceiveWithTimeout(0, 1, 2), // r0 = msg, r1 = timeout, r2 = result
         Instruction::Return(2),                   // return r2 (should be false)
     ];
-    let func = Rc::new(Function::new_bytecode(
-        Some("timeout_test".to_string()),
-        0,
-        3,
-        bytecode,
-    ));
-    let pid = vm.spawn_process(func, vec![]);
+    let func = Function::new_bytecode(Some("timeout_test".to_string()), 0, 3, bytecode);
+    let pid = vm.spawn_process(Rc::new(RefCell::new(func)), vec![]);
     // Run the VM (should block, then timeout)
     vm.run();
     // Wait a bit to ensure timeout expires
@@ -32,8 +28,11 @@ fn test_receive_with_timeout_sets_result_false() {
     vm.run();
     // Check result
     let proc = vm.processes.get(&pid).unwrap().borrow();
-    let result = proc.last_result.as_ref().unwrap_or(&Value::Primitive(Primitive::Undefined));
-    assert!(result==&Value::Primitive(Primitive::Boolean(false)));
+    let result = proc
+        .last_result
+        .as_ref()
+        .unwrap_or(&Value::Primitive(Primitive::Undefined));
+    assert!(result == &Value::Primitive(Primitive::Boolean(false)));
 }
 
 #[test]
@@ -48,38 +47,32 @@ fn test_message_recieved_before_timeout() {
         Instruction::ReceiveWithTimeout(0, 1, 2), // r0 = msg, r1 = timeout, r2 = result
         Instruction::Return(2),                   // return r2 (should be true)
     ];
-    let func = Rc::new(Function::new_bytecode(
-        Some("timeout_test".to_string()),
-        0,
-        3,
-        bytecode,
-    ));
-    let pid = vm.spawn_process(func, vec![]);
+    let func = Function::new_bytecode(Some("timeout_test".to_string()), 0, 3, bytecode);
+    let pid = vm.spawn_process(Rc::new(RefCell::new(func)), vec![]);
 
     // Simulate sending a message before the timeout
     // Run the VM to process the message (should block on receive_with_timeout)
     vm.run();
     // Instead of pushing directly to the mailbox, use the SEND instruction to properly wake the process
-    // But for this test, we mimic a scheduler tick: after pushing, manually wake the process
+    // But for this test, we mimic a scheduler tick: just push to mailbox and let check_blocked_processes handle it.
     {
         let mut proc = vm.processes.get(&pid).unwrap().borrow_mut();
-        proc.mailbox.push(Value::Primitive(Primitive::Number(42.0)));
-        if proc.status == crate::value::ProcessStatus::WaitingForMessage {
-            proc.status = crate::value::ProcessStatus::Runnable;
-            // Also push the pid to the run queue if not already present
-            if !vm.run_queue.contains(&pid) {
-                vm.run_queue.push_back(pid);
-            }
-        }
+        proc.mailbox
+            .push_back(Value::Primitive(Primitive::Number(42.0)));
+        // DO NOT manually set status to Runnable here; let check_blocked_processes do its job.
     }
-    // Now run the VM again, the process should consume the message and set result to true
+    // Now run the VM again, the process should be unblocked by check_blocked_processes,
+    // consume the message and set result to true
     vm.run();
     // Wait till timeout expires, it should have no effect
     thread::sleep(Duration::from_millis(110));
     vm.run();
     // Check result
     let proc = vm.processes.get(&pid).unwrap().borrow();
-    let result = proc.last_result.as_ref().unwrap_or(&Value::Primitive(Primitive::Undefined));
+    let result = proc
+        .last_result
+        .as_ref()
+        .unwrap_or(&Value::Primitive(Primitive::Undefined));
     println!("Result: {:?}", result);
     assert!(result == &Value::Primitive(Primitive::Boolean(true)));
 }

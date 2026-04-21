@@ -4,7 +4,7 @@ use std::env;
 use std::fs::File;
 use std::rc::Rc;
 use vmm::ionpack::IonPackBuilder;
-use vmm::value::{Function, Object, Primitive, PropertyDescriptor, Value};
+use vmm::value::{Function, Object, Primitive, PropertyAccess, PropertyDescriptor, Value};
 use vmm::vm::Instruction;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,7 +43,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Start
             Instruction::LoadConst(
                 0,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 1,
@@ -63,7 +63,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: About to spawn
             Instruction::LoadConst(
                 5,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 6,
@@ -77,7 +77,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Worker spawned
             Instruction::LoadConst(
                 9,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 10,
@@ -92,7 +92,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Task sent, waiting for result
             Instruction::LoadConst(
                 13,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 14,
@@ -106,7 +106,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Got result
             Instruction::LoadConst(
                 17,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 18,
@@ -118,7 +118,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Show the actual result
             Instruction::LoadConst(
                 20,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::Call(21, 20, vec![16]),
             // Return the computed result
@@ -135,7 +135,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Worker started
             Instruction::LoadConst(
                 8,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 9,
@@ -149,7 +149,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Received task
             Instruction::LoadConst(
                 11,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 12,
@@ -161,7 +161,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Show received number
             Instruction::LoadConst(
                 14,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::Call(15, 14, vec![1]),
             // Square the number: result = number * number
@@ -169,7 +169,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Computed result
             Instruction::LoadConst(
                 16,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 17,
@@ -181,7 +181,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Show computed result
             Instruction::LoadConst(
                 19,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::Call(20, 19, vec![2]),
             // Send result back to coordinator (r0 contains coordinator process)
@@ -189,7 +189,7 @@ fn create_unified_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Result sent
             Instruction::LoadConst(
                 21,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 22,
@@ -229,16 +229,16 @@ function coordinator() {
     // 2. Sends it a task
     // 3. Waits for the result
     // 4. Returns the computed value
-    
+
     // Spawn worker and pass self-reference so it can send back
     const worker = spawn("worker_func", [self]);
-    
+
     // Send a number to be squared
     send(worker, 15);
-    
+
     // Wait for the squared result
     const result = receive(); // Should get 225 (15 * 15)
-    
+
     return result;
 }
 
@@ -247,22 +247,22 @@ function worker_func(coordinator) {
     // 1. Receives a task (number to square)
     // 2. Computes the result
     // 3. Sends it back to the coordinator
-    
+
     // Wait for task from coordinator
     const number = receive();
-    
+
     // Compute the square
     const result = number * number;
-    
+
     // Send result back
     send(coordinator, result);
-    
+
     return result;
 }
 
 // This demonstrates the complete actor pattern:
 // 1. Process Spawning: Create new concurrent processes
-// 2. Message Passing: Send data between processes  
+// 2. Message Passing: Send data between processes
 // 3. Synchronization: Coordinate using receive/send
 // 4. Isolation: Each process has its own state
 "#
@@ -339,27 +339,21 @@ fn create_complex_sample() -> Result<(), Box<dyn std::error::Error>> {
         "name".to_string(),
         PropertyDescriptor {
             value: Value::Primitive(Primitive::Atom("Alice".to_string())),
-            writable: true,
-            enumerable: true,
-            configurable: true,
+            access: PropertyAccess::Public,
         },
     );
     object_props.insert(
         "age".to_string(),
         PropertyDescriptor {
             value: Value::Primitive(Primitive::Number(30.0)),
-            writable: true,
-            enumerable: true,
-            configurable: true,
+            access: PropertyAccess::Public,
         },
     );
     object_props.insert(
         "active".to_string(),
         PropertyDescriptor {
             value: Value::Primitive(Primitive::Boolean(true)),
-            writable: true,
-            enumerable: true,
-            configurable: true,
+            access: PropertyAccess::Public,
         },
     );
 
@@ -464,7 +458,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Worker started
             Instruction::LoadConst(
                 8,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 9,
@@ -478,7 +472,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Received message
             Instruction::LoadConst(
                 11,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 12,
@@ -488,7 +482,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print the received value
             Instruction::LoadConst(
                 14,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::Call(15, 14, vec![1]),
             Instruction::LoadConst(2, Value::Primitive(Primitive::Number(2.0))),
@@ -496,7 +490,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Processed result
             Instruction::LoadConst(
                 16,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 17,
@@ -506,7 +500,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print the processed value
             Instruction::LoadConst(
                 19,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::Call(20, 19, vec![3]),
             // Send the result back to coordinator (in r0)
@@ -514,7 +508,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Sent result back
             Instruction::LoadConst(
                 21,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 22,
@@ -548,7 +542,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print start message
             Instruction::LoadConst(
                 0,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 1,
@@ -563,7 +557,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print worker function loaded
             Instruction::LoadConst(
                 4,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 5,
@@ -581,7 +575,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print before spawn
             Instruction::LoadConst(
                 8,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 9,
@@ -595,7 +589,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print after spawn
             Instruction::LoadConst(
                 12,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 13,
@@ -609,7 +603,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print before send
             Instruction::LoadConst(
                 16,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 17,
@@ -623,7 +617,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print after send
             Instruction::LoadConst(
                 19,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 20,
@@ -637,7 +631,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print received result
             Instruction::LoadConst(
                 23,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::LoadConst(
                 24,
@@ -649,7 +643,7 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
             // Debug: Print final result value
             Instruction::LoadConst(
                 26,
-                Value::Primitive(Primitive::Atom("__stdlib:debug".to_string())),
+                Value::Primitive(Primitive::Atom("__stdlib:Debug".to_string())),
             ),
             Instruction::Call(26, 26, vec![22]), // Debug print the actual result value
             // Step 7: Return the received result
@@ -760,16 +754,16 @@ fn create_actors_sample() -> Result<(), Box<dyn std::error::Error>> {
 // Main function demonstrating bidirectional actor communication
 function main() {
     // Note: This shows the bidirectional send-back pattern
-    
+
     // 1. Spawn a worker process, passing self as argument so worker can send back
     const worker = spawn("Worker", [self]);
-    
+
     // 2. Send a task to the worker
     send(worker, 25);
-    
+
     // 3. Receive the result sent back from worker
     const result = receive();  // result should be 50 (25 * 2)
-    
+
     // 4. Return the result
     return result;
 }
@@ -784,13 +778,13 @@ function main() {
 function worker(coordinator_process) {
     // Receive a number from coordinator
     const number = receive();
-    
+
     // Process it (double the number)
     const result = number * 2;
-    
+
     // Send result back to coordinator
     send(coordinator_process, result);
-    
+
     // Return the result as well
     return result;
 }
@@ -805,17 +799,17 @@ function worker(coordinator_process) {
 function ping(pong_process) {
     // Send ping message
     send(pong_process, "ping");
-    
+
     // Wait for pong response
     const response = receive();
-    
+
     return response; // should be "pong"
 }
 
 function pong() {
     // Wait for ping
     const message = receive();
-    
+
     // Respond with pong
     return "pong";
 }
@@ -830,19 +824,19 @@ function pong() {
 function coordinator() {
     // Spawn multiple workers
     const worker1 = spawn("Worker");
-    const worker2 = spawn("Worker"); 
+    const worker2 = spawn("Worker");
     const worker3 = spawn("Worker");
-    
+
     // Distribute tasks
     send(worker1, 10);
     send(worker2, 20);
     send(worker3, 30);
-    
+
     // Collect results
     const result1 = receive(); // 20
     const result2 = receive(); // 40
     const result3 = receive(); // 60
-    
+
     // Return total
     return result1 + result2 + result3; // 120
 }
@@ -856,19 +850,19 @@ function coordinator() {
 // Complete cross-process communication example
 function cross_process_demo() {
     // This demonstrates the full actor model workflow:
-    
+
     // 1. Process Spawning
     const echo_worker = spawn("EchoWorker");
     const math_worker = spawn("Worker");
-    
+
     // 2. Message Passing
     send(echo_worker, "hello");
     send(math_worker, 25);
-    
+
     // 3. Response Handling
     const echo_response = receive(); // "hello"
     const math_response = receive(); // 50
-    
+
     // 4. Coordination
     return math_response; // 50
 }
@@ -887,7 +881,7 @@ This IonPack demonstrates cross-process communication using the actor model in I
 
 ### Process Management
 - `Spawn(dst, func, args)` - Create new process
-- `Send(proc, msg)` - Send message to process  
+- `Send(proc, msg)` - Send message to process
 - `Receive(dst)` - Receive message (blocks until available)
 - `Link(proc)` - Link processes for fault tolerance
 
@@ -907,7 +901,7 @@ Coordinator -> [task] -> Worker -> [result] -> Coordinator
 
 ### Multi-Worker
 ```
-Coordinator -> [task1] -> Worker1 -> [result1] -> 
+Coordinator -> [task1] -> Worker1 -> [result1] ->
             -> [task2] -> Worker2 -> [result2] -> Coordinator
             -> [task3] -> Worker3 -> [result3] ->
 ```
@@ -929,7 +923,7 @@ Ping -> ["ping"] -> Pong -> ["pong"] -> Ping
 ## Notes
 
 The bytecode demonstrates the instruction patterns for actor model programming.
-Full functionality requires VM runtime support for dynamic class loading and 
+Full functionality requires VM runtime support for dynamic class loading and
 process management.
 "#
         .to_string(),

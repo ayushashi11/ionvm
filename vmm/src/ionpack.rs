@@ -560,17 +560,20 @@ impl<R: Read + Seek> IonPackReader<R> {
         // for name in resolv_clone.keys() {
         //     println!("\x1b[36m[VM DEBUG]\x1b[0m found: {}", name); // Cyan color
         // }
-        for (_name, function) in &mut resolved_functions {
+        for (name, function) in &mut resolved_functions {
             // Resolve any references within the function
-            // println!("\x1b[33m[VM DEBUG]\x1b[0m Resolving function references for: {}", name); // Yellow color
+            // println!(
+            //     "\x1b[33m[VM DEBUG]\x1b[0m Resolving function references for: {}",
+            //     name
+            // ); // Yellow color
+            //ref_fn = function.borrow_mut().clone();
             resolve_function_references(function, &resolv_clone);
         }
 
         Ok(resolved_functions)
     }
 
-    /// Get the main function for CLI execution
-    ///
+    /// Get the main function for CLI execution    ///
     /// CLI execution follows this resolution order:
     /// 1. If Entry-Point is specified in manifest, use that exact function
     /// 2. If Main-Class is specified in manifest, load that class and find main function
@@ -579,37 +582,39 @@ impl<R: Read + Seek> IonPackReader<R> {
     /// 5. If no Main-Class is specified, return an error
     /// 6. Resolve function references within the class
     pub fn get_main_function(&mut self) -> Result<Function, IonPackError> {
+        println!("resolving main");
         match self.load_all_functions() {
-        Ok(fns) => {
-            // Fall back to Main-Class behavior
-            let main_class = self
-                .manifest
-                .main_class
-                .clone()
-                .ok_or(IonPackError::MainClassNotSpecified)?;
+            Ok(fns) => {
+                // Fall back to Main-Class behavior
+                let main_class = self
+                    .manifest
+                    .main_class
+                    .clone()
+                    .ok_or(IonPackError::MainClassNotSpecified)?;
 
-            // First check if Entry-Point is specified
-            if let Some(ref entry_point) = self.manifest.entry_point {
-                if let Some(function) = fns.get(format!("{}:{}", main_class, entry_point).as_str())
-                {
-                    return Ok(function.borrow().clone());
+                // First check if Entry-Point is specified
+                if let Some(ref entry_point) = self.manifest.entry_point {
+                    if let Some(function) =
+                        fns.get(format!("{}:{}", main_class, entry_point).as_str())
+                    {
+                        return Ok(function.borrow().clone());
+                    } else {
+                        return Err(IonPackError::FunctionNotFound(entry_point.clone()));
+                    }
+                }
+
+                if let Some(function_ref) = fns.get(format!("{}:main", main_class).as_str()) {
+                    let function = function_ref.borrow().clone();
+                    // If it's a multi-function class, find the first function with arity 0
+                    if function.arity == 0 {
+                        return Ok(function.clone());
+                    }
                 } else {
-                    return Err(IonPackError::FunctionNotFound(entry_point.clone()));
+                    return Err(IonPackError::ClassNotFound(main_class));
                 }
             }
-
-            if let Some(function_ref) = fns.get(format!("{}:main", main_class).as_str()) {
-                let function = function_ref.borrow();
-                // If it's a multi-function class, find the first function with arity 0
-                if function.arity == 0 {
-                    return Ok(function.clone());
-                }
-            } else {
-                return Err(IonPackError::ClassNotFound(main_class));
-            }
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e)
-    }
 
         Err(IonPackError::MainFunctionNotFound)
     }

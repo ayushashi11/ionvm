@@ -1,0 +1,289 @@
+{
+  "version": "1.0",
+  "description": "IonVM Standard Library FFI Bindings",
+  "functions": {
+    "debug": {
+      "arity": 1,
+      "params": ["value"],
+      "vm_name": "Debug",
+      "return_type": "Unit",
+      "category": "stdlib",
+      "description": "Print a value to debug output"
+    },
+    "print": {
+      "arity": 1,
+      "params": ["message"],
+      "vm_name": "Print",
+      "return_type": "Unit",
+      "category": "stdlib",
+      "description": "Print a message without newline"
+    },
+    "println": {
+      "arity": 1,
+      "params": ["message"],
+      "vm_name": "PrintLn",
+      "return_type": "Unit",
+      "category": "stdlib",
+      "description": "Print a message with newline"
+    },
+    "StrLength": {
+      "arity": 1,
+      "params": ["string"],
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Get the length of a string"
+    },
+    "StrUpper": {
+      "arity": 1,
+      "params": ["string"],
+      "return_type": "String",
+      "category": "stdlib",
+      "description": "Convert string to uppercase"
+    },
+    "StrLower": {
+      "arity": 1,
+      "params": ["string"],
+      "return_type": "String",
+      "category": "stdlib",
+      "description": "Convert string to lowercase"
+    },
+    "StrConcat": {
+      "arity": 2,
+      "params": ["a", "b"],
+      "return_type": "String",
+      "category": "stdlib",
+      "description": "Concatenate two strings"
+    },
+    "StrSplit": {
+      "arity": 2,
+      "params": ["string", "delimiter"],
+      "return_type": "Array",
+      "category": "stdlib",
+      "description": "Split string by delimiter"
+    },
+    "StrTrim": {
+      "arity": 1,
+      "params": ["string"],
+      "return_type": "String",
+      "category": "stdlib",
+      "description": "Trim whitespace from string"
+    },
+    "sqrt": {
+      "arity": 1,
+      "params": ["number"],
+      "vm_name": "Sqrt",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Square root"
+    },
+    "abs": {
+      "arity": 1,
+      "params": ["number"],
+      "vm_name": "Abs",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Absolute value"
+    },
+    "sin": {
+      "arity": 1,
+      "params": ["radians"],
+      "vm_name": "Sin",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Sine (radians)"
+    },
+    "cos": {
+      "arity": 1,
+      "params": ["radians"],
+      "vm_name": "Cos",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Cosine (radians)"
+    },
+    "floor": {
+      "arity": 1,
+      "params": ["number"],
+      "vm_name": "Floor",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Floor function"
+    },
+    "ceil": {
+      "arity": 1,
+      "params": ["number"],
+      "vm_name": "Ceil",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Ceiling function"
+    },
+    "round": {
+      "arity": 1,
+      "params": ["number"],
+      "vm_name": "Round",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Round to nearest integer"
+    },
+    "max": {
+      "arity": 2,
+      "params": ["a", "b"],
+      "vm_name": "Max",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Maximum of two numbers"
+    },
+    "min": {
+      "arity": 2,
+      "params": ["a", "b"],
+      "vm_name": "Min",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Minimum of two numbers"
+    },
+    "pow": {
+      "arity": 2,
+      "params": ["base", "exponent"],
+      "vm_name": "Pow",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Power function"
+    },
+    "log": {
+      "arity": 1,
+      "params": ["number"],
+      "vm_name": "Log",
+      "return_type": "Float",
+      "category": "stdlib",
+      "description": "Natural logarithm"
+    }
+  },
+  "objects": {
+    "File": {
+      "description": "Native file I/O object",
+      "native_backing": true,
+      "category": "stdlib",
+      "methods": {
+        "open": {
+          "arity": 1,
+          "params": ["path"],
+          "return_type": "File",
+          "static": true,
+          "description": "Open a file for reading"
+        },
+        "create": {
+          "arity": 1,
+          "params": ["path"],
+          "return_type": "File",
+          "static": true,
+          "description": "Create a new file for writing"
+        },
+        "read": {
+          "arity": 0,
+          "params": [],
+          "return_type": "String",
+          "description": "Read entire file contents"
+        },
+        "read_line": {
+          "arity": 0,
+          "params": [],
+          "return_type": "String",
+          "description": "Read a single line"
+        },
+        "write": {
+          "arity": 1,
+          "params": ["content"],
+          "return_type": "Unit",
+          "description": "Write content to file"
+        },
+        "write_line": {
+          "arity": 1,
+          "params": ["content"],
+          "return_type": "Unit",
+          "description": "Write a line to file"
+        },
+        "close": {
+          "arity": 0,
+          "params": [],
+          "return_type": "Unit",
+          "description": "Close the file"
+        }
+      }
+    },
+    "Map": {
+      "description": "Native HashMap wrapper",
+      "native_backing": true,
+      "category": "stdlib",
+      "methods": {
+        "new": {
+          "arity": 0,
+          "params": [],
+          "return_type": "Map",
+          "static": true,
+          "description": "Create a new empty map"
+        },
+        "get": {
+          "arity": 1,
+          "params": ["key"],
+          "return_type": "Unit",
+          "description": "Get a value by key (returns undefined if not found)"
+        },
+        "insert": {
+          "arity": 2,
+          "params": ["key", "value"],
+          "return_type": "Unit",
+          "description": "Insert or update a key-value pair"
+        },
+        "remove": {
+          "arity": 1,
+          "params": ["key"],
+          "return_type": "Bool",
+          "description": "Remove a key, returns true if it existed"
+        },
+        "contains": {
+          "arity": 1,
+          "params": ["key"],
+          "return_type": "Bool",
+          "description": "Check if a key exists"
+        },
+        "size": {
+          "arity": 0,
+          "params": [],
+          "return_type": "Float",
+          "description": "Get the number of entries"
+        },
+        "clear": {
+          "arity": 0,
+          "params": [],
+          "return_type": "Unit",
+          "description": "Clear all entries"
+        }
+      }
+    },
+    "Timer": {
+      "description": "Native timer/stopwatch",
+      "native_backing": true,
+      "category": "stdlib",
+      "methods": {
+        "new": {
+          "arity": 0,
+          "params": [],
+          "return_type": "Timer",
+          "static": true,
+          "description": "Create a new timer (starts immediately)"
+        },
+        "elapsed": {
+          "arity": 0,
+          "params": [],
+          "return_type": "Float",
+          "description": "Get elapsed time in milliseconds"
+        },
+        "reset": {
+          "arity": 0,
+          "params": [],
+          "return_type": "Unit",
+          "description": "Reset the timer"
+        }
+      }
+    }
+  }
+}

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::env;
 use std::rc::Rc;
 use vmm::value::{Function, FunctionType, Primitive, Value};
@@ -34,7 +35,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Instruction::Return(2),    // return doubled value
             ],
         },
-        bound_this: None
+        bound_this: None,
+        closure_env: None,
+        capture_order: Vec::new(),
     };
 
     // Create a coordinator function that spawns worker and communicates
@@ -51,11 +54,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ],
         },
         bound_this: None,
+        closure_env: None,
+        capture_order: Vec::new(),
     };
 
     // MANUALLY test the cross-process communication
     println!("1. Spawning worker process...");
-    let worker_pid = vm.spawn_process(Rc::new(worker_function), vec![]);
+    let worker_pid = vm.spawn_process(Rc::new(RefCell::new(worker_function)), vec![]);
 
     println!("2. Getting worker process reference...");
     let worker_proc = vm.processes.get(&worker_pid).unwrap().clone();
@@ -65,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut worker = worker_proc.borrow_mut();
         worker
             .mailbox
-            .push(Value::Primitive(Primitive::Number(21.0)));
+            .push_back(Value::Primitive(Primitive::Number(21.0)));
     }
 
     println!("4. Running VM to process messages...");
@@ -93,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Test with coordinator process
     println!("\n6. Testing coordinator process...");
-    let coord_pid = vm.spawn_process(Rc::new(coordinator_function), vec![]);
+    let coord_pid = vm.spawn_process(Rc::new(RefCell::new(coordinator_function)), vec![]);
     vm.run();
 
     let coord_result = {

@@ -3,7 +3,7 @@
 //! This module provides functionality to convert bytecode to and from
 //! a human-readable textual format for debugging and development.
 
-use crate::value::{Function, FunctionType, Primitive, Value};
+use crate::value::{Function, FunctionType, Primitive, PropertyAccess, Value};
 use crate::vm::{Instruction, Pattern};
 use std::fmt::{self, Write};
 
@@ -36,17 +36,17 @@ pub fn instruction_to_text(instr: &Instruction) -> String {
             let args_str = kvs
                 .iter()
                 .map(|(k, v)| match v {
-                    crate::value::ObjectInitArg::RegisterWithFlags(r, w, e, c) => {
-                        format!("{}:r{}:{}:{}:{}", k, r, w, e, c)
+                    crate::value::ObjectInitArg::RegisterWithAccess(r, a) => {
+                        format!("{}:r{}:{:?}", k, r, a)
                     }
-                    crate::value::ObjectInitArg::ValueWithFlags(val, w, e, c) => {
-                        format!("{}:{}:{}:{}:{}", k, value_to_text(val), w, e, c)
+                    crate::value::ObjectInitArg::ValueWithAccess(val, a) => {
+                        format!("{}:{}:{:?}", k, value_to_text(val), a)
                     }
                     crate::value::ObjectInitArg::Register(r) => {
-                        format!("{}:r{}:true:true:true", k, r)
+                        format!("{}:r{}:{:?}", k, r, PropertyAccess::Public)
                     }
                     crate::value::ObjectInitArg::Value(val) => {
-                        format!("{}:{}:true:true:true", k, value_to_text(val))
+                        format!("{}:{}:{:?}", k, value_to_text(val), PropertyAccess::Public)
                     }
                 })
                 .collect::<Vec<_>>()
@@ -69,10 +69,29 @@ pub fn instruction_to_text(instr: &Instruction) -> String {
                 .join(", ");
             format!("CALL r{}, r{}, [{}]", dst, func, args_str)
         }
+        Instruction::MakeClosure(dst, func, scope_id, captures) => {
+            let captures_str = captures
+                .iter()
+                .map(|(name, reg)| format!("{}:r{}", name, reg))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "MAKE_CLOSURE r{}, r{}, '{}', [{}]",
+                dst, func, scope_id, captures_str
+            )
+        }
         Instruction::Return(reg) => format!("RETURN r{}", reg),
         Instruction::Jump(offset) => format!("JUMP {}", offset),
         Instruction::JumpIfTrue(cond, offset) => format!("JUMP_IF_TRUE r{}, {}", cond, offset),
         Instruction::JumpIfFalse(cond, offset) => format!("JUMP_IF_FALSE r{}, {}", cond, offset),
+        Instruction::ArrayInit(dst, srcs) => {
+            let srcs_str = srcs
+                .iter()
+                .map(|r| format!("r{}", r))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ARRAY_INIT r{}, [{}]", dst, srcs_str)
+        }
         Instruction::Spawn(dst, func, args) => {
             let args_str = args
                 .iter()
@@ -169,7 +188,6 @@ pub fn value_to_text(val: &Value) -> String {
             let elems_str = tup.iter().map(value_to_text).collect::<Vec<_>>().join(", ");
             format!("({})", elems_str)
         }
-        Value::TaggedEnum(_) => "TaggedEnum".to_string(),
         Value::Function(_) => "Function".to_string(),
         Value::Closure(_) => "Closure".to_string(),
         Value::Process(_) => "Process".to_string(),
@@ -198,7 +216,7 @@ pub fn pattern_to_text(pat: &Pattern) -> String {
             format!("[{}]", pats_str)
         }
         Pattern::TaggedEnum(tag, inner) => {
-            format!("{}({})", tag, pattern_to_text(inner))
+            format!("Object(__tag:{}, __slots:{})", tag, pattern_to_text(inner))
         }
     }
 }

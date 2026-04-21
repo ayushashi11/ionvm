@@ -15,9 +15,7 @@ impl ToFfiValue for Value {
         match self {
             Value::Primitive(Primitive::Number(n)) => FfiValue::Number(*n),
             Value::Primitive(Primitive::Boolean(b)) => FfiValue::Boolean(*b),
-            Value::Primitive(Primitive::String(s)) => {
-                FfiValue::String(s.clone())
-            },
+            Value::Primitive(Primitive::String(s)) => FfiValue::String(s.clone()),
             Value::Primitive(Primitive::Complex(c)) => FfiValue::Complex(c.clone()),
             Value::Primitive(Primitive::Atom(s)) => FfiValue::Atom(s.clone()),
             Value::Primitive(Primitive::Unit) => FfiValue::Unit,
@@ -50,8 +48,7 @@ impl ToFfiValue for Value {
                 }
                 FfiValue::Object(ffi_obj)
             }
-            Value::TaggedEnum(_) => FfiValue::String("[TaggedEnum]".to_string()),
-            Value::Function(_) => FfiValue::String("[Function]".to_string()),
+            Value::Function(f) => FfiValue::String(format!("[Function: {}]", f.borrow().name.clone().unwrap_or("<unnamed>".to_string()))),
             Value::Closure(_) => FfiValue::String("[Closure]".to_string()),
             Value::Process(_) => FfiValue::String("[Process]".to_string()),
         }
@@ -99,15 +96,9 @@ impl FromFfiValue for Value {
                 let mut vm_obj = Object::new(None);
                 for (key, ffi_val) in obj {
                     let vm_val = Value::from_ffi(ffi_val)?;
-                    vm_obj.properties.insert(
-                        key,
-                        PropertyDescriptor {
-                            value: vm_val,
-                            writable: true,
-                            enumerable: true,
-                            configurable: true,
-                        },
-                    );
+                    vm_obj
+                        .properties
+                        .insert(key, PropertyDescriptor::public(vm_val));
                 }
                 Ok(Value::Object(Rc::new(RefCell::new(vm_obj))))
             }
@@ -229,7 +220,9 @@ mod tests {
     fn test_string_functions() {
         let registry = FfiRegistry::with_stdlib();
 
-        let args = vec![Value::Primitive(Primitive::String("hello world".to_string()))];
+        let args = vec![Value::Primitive(Primitive::String(
+            "hello world".to_string(),
+        ))];
 
         let result = call_ffi_function(&registry, "StrLength", args);
 
