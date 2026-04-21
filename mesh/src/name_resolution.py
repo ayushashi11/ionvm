@@ -625,6 +625,9 @@ class Resolver:
 
         if isinstance(expr, A.LambdaExpr):
             return self._resolve_lambda(expr, scope)
+        
+        if isinstance(expr, A.BlockExpr):
+            return self._resolve_block(expr, scope)
 
         return expr  # passthrough
 
@@ -710,6 +713,10 @@ class Resolver:
 
         return pat
 
+    def _resolve_block(self, block: A.BlockExpr, outer: Scope) -> A.BlockExpr:
+        block_scope = Scope(parent=outer)
+        body = [self._resolve_stmt(s, block_scope) for s in block.stmts]
+        return A.BlockExpr(body)
 
 # ── Public API ────────────────────────────────────────────────────────────────
 

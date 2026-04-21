@@ -102,7 +102,7 @@ pub(super) fn exec_call(
     func_reg: usize,
     arg_regs: Vec<usize>,
 ) -> ExecutionResult {
-    let (func_val, args) = {
+    let (func_val, args, curr_fn_name, curr_pc) = {
         let frame = proc.frames.last().expect("active frame required");
         //dbg!(frame.function.name.clone());
         let func_val = frame.registers[func_reg].clone();
@@ -110,7 +110,7 @@ pub(super) fn exec_call(
             .iter()
             .map(|&r| frame.registers[r].clone())
             .collect();
-        (func_val, args)
+        (func_val, args, frame.function.borrow().name.clone(), frame.ip)
     };
 
     match func_val {
@@ -181,6 +181,6 @@ pub(super) fn exec_call(
             ExecutionResult::Continue
         }
 
-        other => panic!("attempted to call a non-function value: {:?}", other),
+        other => panic!("attempted to call a non-function value: {:?} in {:?}:{}", other, curr_fn_name, curr_pc),
     }
 }

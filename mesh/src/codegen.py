@@ -690,9 +690,6 @@ class Codegen:
             # Otherwise, we need to return unit
             if last_reg is None:
                 dst = self.allocate_reg()
-                self.instructions.append(
-                    ionvm.Instruction.load_const(dst, ionvm.Value.unit())
-                )
                 return dst
             return last_reg
 
