@@ -11,3 +11,4 @@ python-ionvm/ionvm.egg-info
 .vscode/
 .gemini/**
 .venv/**
+*.so

@@ -15,8 +15,8 @@ fn area(s Shape) -> Result[Float, String]:
         :Rect(w, h) => :Ok(w * h)
         _ => :Err("Unsupported shape")
 
-fn proc():
-    println("inside proc")
+const proc = fn():
+    println("inside proc! yay!")
     const dat = receive()
     println("proc recievd", dat)
 

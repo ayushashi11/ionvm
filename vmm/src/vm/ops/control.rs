@@ -96,7 +96,7 @@ pub(super) fn exec_return(proc: &mut Process, reg: usize) -> ExecutionResult {
 }
 
 pub(super) fn exec_call(
-    vm: &IonVM,
+    vm: &mut IonVM,
     proc: &mut Process,
     dst_reg: usize,
     func_reg: usize,
@@ -104,7 +104,6 @@ pub(super) fn exec_call(
 ) -> ExecutionResult {
     let (func_val, args, curr_fn_name, curr_pc) = {
         let frame = proc.frames.last().expect("active frame required");
-        //dbg!(frame.function.name.clone());
         let func_val = frame.registers[func_reg].clone();
         let args: Vec<Value> = arg_regs
             .iter()
@@ -114,8 +113,22 @@ pub(super) fn exec_call(
     };
 
     match func_val {
+        Value::Native(native_rc) => {
+            // Calling the native object directly
+            native_rc.borrow_mut().call_method(
+                vm,
+                proc,
+                Some(Value::Native(native_rc.clone())),
+                "__call",
+                args,
+                dst_reg,
+            )
+        }
         Value::Function(func_rc) => {
-            let function_type = func_rc.borrow().function_type.clone();
+            let (function_type, bound_this) = {
+                let func = func_rc.borrow();
+                (func.function_type.clone(), func.bound_this.clone())
+            };
             match function_type {
                 FunctionType::Bytecode { .. } => {
                     let (total_regs, prefix) = {
@@ -150,17 +163,24 @@ pub(super) fn exec_call(
                     ExecutionResult::Continue
                 }
                 FunctionType::Ffi { function_name } => {
-                    let result = call_ffi_function(&vm.ffi_registry, &function_name, args);
+                    let result =
+                        call_ffi_function(vm, proc, bound_this, &function_name, args, dst_reg);
                     let frame = proc.frames.last_mut().expect("active frame required");
                     match result {
-                        FfiCallResult::Success(v) => frame.registers[dst_reg] = v,
+                        FfiCallResult::Success(v) => {
+                            let frame = proc.frames.last_mut().expect("active frame required");
+                            frame.registers[dst_reg] = v;
+                            ExecutionResult::Continue
+                        }
+                        FfiCallResult::Deferred => ExecutionResult::Continue,
                         FfiCallResult::Error(e) => {
+                            let frame = proc.frames.last_mut().expect("active frame required");
                             frame.registers[dst_reg] =
                                 Value::Primitive(Primitive::Atom(format!("error:{}", e)));
+                            ExecutionResult::Continue
                         }
                         FfiCallResult::Yield(_) => todo!("FFI yield not yet implemented"),
                     }
-                    ExecutionResult::Continue
                 }
             }
         }

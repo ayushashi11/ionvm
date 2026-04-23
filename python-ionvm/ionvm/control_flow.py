@@ -1,6 +1,6 @@
 #
 # MatchBuilder for ergonomic pattern matching
-from ionvm_rust import Pattern
+from .ionvm_rust import Pattern
 
 
 class MatchBuilder:
@@ -44,7 +44,7 @@ without manually calculating jump offsets, similar to LLVM's basic blocks.
 """
 from typing import Callable, List, Optional
 
-from ionvm_rust import Instruction
+from .ionvm_rust import Instruction
 
 
 class Condition:

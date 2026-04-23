@@ -1,8 +1,11 @@
 //! I/O functions for the standard library
 
 use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
-use std::{io::{self, Write}, process::Output};
 use regex::Regex;
+use std::{
+    io::{self, Write},
+    process::Output,
+};
 
 /// Macro to create I/O FFI functions
 macro_rules! io_function {
@@ -10,7 +13,7 @@ macro_rules! io_function {
         pub struct $name;
 
         impl FfiFunction for $name {
-            fn call(&self, $args: Vec<FfiValue>) -> FfiResult {
+            fn call(&self, _ctx: &mut dyn crate::FfiContext, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() != $arity {
                     return Err(FfiError::ArgumentCount {
                         expected: $arity,
@@ -38,7 +41,7 @@ macro_rules! io_function {
         pub struct $name;
 
         impl FfiFunction for $name {
-            fn call(&self, $args: Vec<FfiValue>) -> FfiResult {
+            fn call(&self, _ctx: &mut dyn crate::FfiContext, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() < $arity {
                     return Err(FfiError::ArgumentCount {
                         expected: $arity,
@@ -91,10 +94,18 @@ fn format_value(value: &FfiValue) -> String {
             format!("[{}]", items.join(", "))
         }
         FfiValue::Object(obj) => {
-            if obj.contains_key("__tag"){
+            if obj.contains_key("__tag") {
                 let tag = obj.get("__tag").unwrap();
                 if let FfiValue::Atom(tag_str) = tag {
-                    return format!(":{}{}", tag_str, obj.iter().filter(|(k, _)| *k != "__tag").map(|(_, v)| format_value(v)).collect::<Vec<_>>().join(", "));
+                    return format!(
+                        ":{}{}",
+                        tag_str,
+                        obj.iter()
+                            .filter(|(k, _)| *k != "__tag")
+                            .map(|(_, v)| format_value(v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
                 }
             }
             let items: Vec<String> = obj
@@ -103,6 +114,7 @@ fn format_value(value: &FfiValue) -> String {
                 .collect();
             format!("{{{}}}", items.join(", "))
         }
+        FfiValue::Native(_) => "[NativeObject]".to_string(),
     }
 }
 
@@ -110,6 +122,7 @@ fn format_value_for_debug(value: &FfiValue) -> String {
     match value {
         FfiValue::Atom(s) => format!(":{}", s),
         FfiValue::String(s) => format!("\"{}\"", s),
+        FfiValue::Native(_) => "[NativeObject]".to_string(),
         _ => format_value(value),
     }
 }
@@ -122,9 +135,9 @@ io_function!(
     "Print a value to stdout without newline",
     |args| {
         let mut output = String::new() + &format_value(&args[0]);
-    for arg in &args[1..] {
-        output.push_str(&format!(", {}", format_value(arg)));
-    }
+        for arg in &args[1..] {
+            output.push_str(&format!(", {}", format_value(arg)));
+        }
         print!("{}", output);
         io::stdout()
             .flush()
@@ -133,14 +146,20 @@ io_function!(
     }
 );
 
-io_function!(PrintLn, 1, true, "Print a value to stdout with newline", |args| {
-    let mut output = String::new() + &format_value(&args[0]);
-    for arg in &args[1..] {
-        output.push_str(&format!(", {}", format_value(arg)));
+io_function!(
+    PrintLn,
+    1,
+    true,
+    "Print a value to stdout with newline",
+    |args| {
+        let mut output = String::new() + &format_value(&args[0]);
+        for arg in &args[1..] {
+            output.push_str(&format!(", {}", format_value(arg)));
+        }
+        println!("{}", output);
+        Ok(FfiValue::Unit)
     }
-    println!("{}", output);
-    Ok(FfiValue::Unit)
-});
+);
 
 io_function!(
     PrintF,
@@ -155,7 +174,10 @@ io_function!(
                 let mut formatted = format_str.clone();
                 // return an error if there are not enough arguments, match both {}s and {number}s
                 let num_placeholders = formatted.matches("{}").count();
-                let num_named_placeholders = Regex::new(r"\{\d+\}").unwrap().find_iter(&formatted).count();
+                let num_named_placeholders = Regex::new(r"\{\d+\}")
+                    .unwrap()
+                    .find_iter(&formatted)
+                    .count();
                 if args.len() < num_placeholders + num_named_placeholders {
                     return Err(FfiError::ArgumentCount {
                         expected: num_placeholders + num_named_placeholders,
@@ -164,12 +186,17 @@ io_function!(
                 }
                 // Replace all the {number}s in the format string
                 // with the corresponding argument values
-                args = args.iter().enumerate().filter(|(i, arg)| {
-                    let placeholder = format!("{{{}}}", i);
-                    let ret = formatted.contains(&placeholder);
-                    formatted = formatted.replace(&placeholder, arg);
-                    !ret
-                }).map(|(_, arg)| arg.clone()).collect();
+                args = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, arg)| {
+                        let placeholder = format!("{{{}}}", i);
+                        let ret = formatted.contains(&placeholder);
+                        formatted = formatted.replace(&placeholder, arg);
+                        !ret
+                    })
+                    .map(|(_, arg)| arg.clone())
+                    .collect();
                 for arg in args {
                     formatted = formatted.replacen("{}", &arg, 1);
                 }
@@ -218,6 +245,13 @@ pub fn register_io_functions(registry: &mut FfiRegistry) {
 mod tests {
     use super::*;
 
+    struct MockContext;
+    impl crate::FfiContext for MockContext {
+        fn get_this(&self) -> Option<FfiValue> {
+            None
+        }
+    }
+
     #[test]
     fn test_format_value() {
         assert_eq!(format_value(&FfiValue::Number(42.0)), "42");
@@ -240,6 +274,8 @@ mod tests {
     fn test_print_functions() {
         let mut registry = FfiRegistry::new();
         register_io_functions(&mut registry);
+
+        let mut _ctx = MockContext;
 
         // Test that functions are registered
         assert!(registry.get_function_info("Print").is_some());

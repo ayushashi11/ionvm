@@ -191,6 +191,7 @@ pub fn value_to_text(val: &Value) -> String {
         Value::Function(_) => "Function".to_string(),
         Value::Closure(_) => "Closure".to_string(),
         Value::Process(_) => "Process".to_string(),
+        Value::Native(_) => "Native".to_string(),
     }
 }
 

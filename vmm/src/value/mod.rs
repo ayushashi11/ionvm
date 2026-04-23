@@ -25,6 +25,10 @@ pub enum Primitive {
     Undefined,
 }
 
+pub struct NativeObjectWrapper {
+    pub inner: Rc<RefCell<dyn NativeInterface>>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Primitive(Primitive),
@@ -35,6 +39,23 @@ pub enum Value {
     Function(Rc<RefCell<Function>>),
     Closure(Rc<Closure>),
     Process(Rc<RefCell<Process>>),
+    Native(Rc<RefCell<dyn NativeInterface>>),
+}
+
+pub trait NativeInterface: std::fmt::Debug {
+    fn tag(&self) -> String;
+    fn inner_value(&self) -> Value;
+    fn get_property(&self, key: &str) -> Value;
+    fn set_property(&mut self, key: &str, value: Value);
+    fn call_method(
+        &mut self,
+        vm: &mut crate::vm::IonVM,
+        proc: &mut crate::value::process::Process,
+        bound_this: Option<Value>,
+        name: &str,
+        args: Vec<Value>,
+        dst_reg: usize,
+    ) -> crate::vm::ExecutionResult;
 }
 
 impl PartialEq for Value {
@@ -48,6 +69,7 @@ impl PartialEq for Value {
             (Function(a), Function(b)) => Rc::ptr_eq(a, b),
             (Closure(a), Closure(b)) => Rc::ptr_eq(a, b),
             (Process(a), Process(b)) => a.borrow().pid == b.borrow().pid,
+            (Native(a), Native(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }

@@ -25,6 +25,9 @@ pub(super) fn exec_get_prop(frame: &mut Frame, dst: usize, obj_reg: usize, key_r
             .borrow()
             .get_property(key)
             .unwrap_or(Value::Primitive(Primitive::Undefined)),
+        (Value::Native(native_rc), Value::Primitive(Primitive::Atom(key))) => {
+            native_rc.borrow().get_property(key)
+        }
         (Value::Array(arr_rc), Value::Primitive(Primitive::Atom(key))) => {
             key.parse::<usize>()
                 .ok()
@@ -70,8 +73,15 @@ pub(super) fn exec_get_prop(frame: &mut Frame, dst: usize, obj_reg: usize, key_r
 pub(super) fn exec_set_prop(frame: &mut Frame, obj_reg: usize, key_reg: usize, val_reg: usize) {
     let obj_val = frame.registers[obj_reg].clone();
     let key_val = frame.registers[key_reg].clone();
-    if let (Value::Object(obj_rc), Value::Primitive(Primitive::Atom(key))) = (obj_val, key_val) {
-        let value = frame.registers[val_reg].clone();
-        obj_rc.borrow_mut().set_property(&key, value);
+    let value = frame.registers[val_reg].clone();
+
+    match (obj_val, key_val) {
+        (Value::Object(obj_rc), Value::Primitive(Primitive::Atom(key))) => {
+            obj_rc.borrow_mut().set_property(&key, value);
+        }
+        (Value::Native(native_rc), Value::Primitive(Primitive::Atom(key))) => {
+            native_rc.borrow_mut().set_property(&key, value);
+        }
+        _ => {}
     }
 }

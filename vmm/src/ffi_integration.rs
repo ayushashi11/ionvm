@@ -3,11 +3,26 @@
 //! This module provides the bridge between the VM and the vm-ffi library,
 //! allowing the VM to call external Rust and Python functions.
 
-use crate::value::{Primitive, Value};
+use crate::value::{Primitive, Value, Process};
+use crate::vm::IonVM;
+use std::cell::RefCell;
+use std::rc::Rc;
 use vm_ffi::{
     FfiError, FfiRegistry, FfiValue,
     bridge::{FromFfiValue, ToFfiValue},
 };
+
+pub struct VmFfiContext<'a> {
+    pub vm: &'a IonVM,
+    pub proc: &'a Process,
+    pub bound_this: Option<Value>,
+}
+
+impl<'a> vm_ffi::FfiContext for VmFfiContext<'a> {
+    fn get_this(&self) -> Option<FfiValue> {
+        self.bound_this.as_ref().map(|v| v.to_ffi())
+    }
+}
 
 /// Implement conversion from VM Value to FFI Value
 impl ToFfiValue for Value {
@@ -20,6 +35,10 @@ impl ToFfiValue for Value {
             Value::Primitive(Primitive::Atom(s)) => FfiValue::Atom(s.clone()),
             Value::Primitive(Primitive::Unit) => FfiValue::Unit,
             Value::Primitive(Primitive::Undefined) => FfiValue::Undefined,
+
+            Value::Native(native_rc) => FfiValue::Native(Rc::new(crate::value::NativeObjectWrapper {
+                inner: native_rc.clone(),
+            })),
 
             // For complex types, we could serialize them or provide references
             // For now, we'll convert them to strings
@@ -66,6 +85,14 @@ impl FromFfiValue for Value {
             FfiValue::Complex(c) => Ok(Value::Primitive(Primitive::Complex(c))),
             FfiValue::Unit => Ok(Value::Primitive(Primitive::Unit)),
             FfiValue::Undefined => Ok(Value::Primitive(Primitive::Undefined)),
+            FfiValue::Native(any_rc) => {
+                if let Ok(wrapper) = any_rc.downcast::<crate::value::NativeObjectWrapper>() {
+                    return Ok(Value::Native(wrapper.inner.clone()));
+                }
+                Err(FfiError::RuntimeError(
+                    "Unsupported native object from FFI".to_string(),
+                ))
+            }
             FfiValue::Tuple(arr) => {
                 // Convert FFI tuple to VM tuples
                 use std::rc::Rc;
@@ -112,19 +139,44 @@ pub enum FfiCallResult {
     Success(Value),
     Error(String),
     Yield(Value), // Used for iterators
+    Deferred,     // Call is handled by pushing a frame
 }
 
 /// Helper function to call an FFI function with VM values
 pub fn call_ffi_function(
-    registry: &FfiRegistry,
+    vm: &mut IonVM,
+    proc: &mut Process,
+    bound_this: Option<Value>,
     function_name: &str,
     args: Vec<Value>,
+    dst_reg: usize,
 ) -> FfiCallResult {
+    // If bound_this is a native object, give it first crack at the call
+    if let Some(Value::Native(native_rc)) = &bound_this {
+        let result = native_rc
+            .borrow_mut()
+            .call_method(vm, proc, bound_this.clone(), function_name, args, dst_reg);
+        match result {
+            crate::vm::ExecutionResult::Continue => {
+                return FfiCallResult::Deferred;
+            }
+            crate::vm::ExecutionResult::Exited(v) => return FfiCallResult::Success(v),
+            crate::vm::ExecutionResult::Error(e) => return FfiCallResult::Error(e),
+            _ => return FfiCallResult::Success(Value::Primitive(Primitive::Unit)),
+        }
+    }
+
     // Convert VM values to FFI values
     let ffi_args: Vec<FfiValue> = args.iter().map(|v| v.to_ffi()).collect();
 
+    let mut ctx = VmFfiContext {
+        vm,
+        proc,
+        bound_this,
+    };
+
     // Call the FFI function
-    match registry.call(function_name, ffi_args) {
+    match vm.ffi_registry.call(&mut ctx, function_name, ffi_args) {
         Ok(ffi_result) => {
             // Convert FFI result back to VM value
             match Value::from_ffi(ffi_result) {
@@ -139,7 +191,7 @@ pub fn call_ffi_function(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vm_ffi::FfiRegistry;
+    use std::rc::Rc;
 
     #[test]
     fn test_value_conversion_roundtrip() {
@@ -162,9 +214,6 @@ mod tests {
 
     #[test]
     fn test_array_conversion() {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
         let vm_array = Value::Array(Rc::new(RefCell::new(vec![
             Value::Primitive(Primitive::Number(1.0)),
             Value::Primitive(Primitive::Number(2.0)),
@@ -184,11 +233,12 @@ mod tests {
 
     #[test]
     fn test_ffi_function_call() {
-        let registry = FfiRegistry::with_stdlib();
+        let mut vm = IonVM::new();
+        let mut proc = Process::new(1, Rc::new(RefCell::new(crate::value::Function::new_ffi(None, 0, "".to_string()))), vec![]);
 
         let args = vec![Value::Primitive(Primitive::Number(16.0))];
 
-        let result = call_ffi_function(&registry, "Sqrt", args);
+        let result = call_ffi_function(&mut vm, &mut proc, None, "Sqrt", args, 0);
 
         match result {
             FfiCallResult::Success(Value::Primitive(Primitive::Number(n))) => {
@@ -200,13 +250,14 @@ mod tests {
 
     #[test]
     fn test_ffi_function_call_error() {
-        let registry = FfiRegistry::with_stdlib();
+        let mut vm = IonVM::new();
+        let mut proc = Process::new(1, Rc::new(RefCell::new(crate::value::Function::new_ffi(None, 0, "".to_string()))), vec![]);
 
         let args = vec![Value::Primitive(Primitive::Atom(
             "not a number".to_string(),
         ))];
 
-        let result = call_ffi_function(&registry, "Sqrt", args);
+        let result = call_ffi_function(&mut vm, &mut proc, None, "Sqrt", args, 0);
 
         match result {
             FfiCallResult::Error(_) => {
@@ -218,13 +269,14 @@ mod tests {
 
     #[test]
     fn test_string_functions() {
-        let registry = FfiRegistry::with_stdlib();
+        let mut vm = IonVM::new();
+        let mut proc = Process::new(1, Rc::new(RefCell::new(crate::value::Function::new_ffi(None, 0, "".to_string()))), vec![]);
 
         let args = vec![Value::Primitive(Primitive::String(
             "hello world".to_string(),
         ))];
 
-        let result = call_ffi_function(&registry, "StrLength", args);
+        let result = call_ffi_function(&mut vm, &mut proc, None, "StrLength", args, 0);
 
         match result {
             FfiCallResult::Success(Value::Primitive(Primitive::Number(n))) => {

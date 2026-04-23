@@ -8,7 +8,7 @@ macro_rules! string_function {
         pub struct $name;
 
         impl FfiFunction for $name {
-            fn call(&self, $args: Vec<FfiValue>) -> FfiResult {
+            fn call(&self, _ctx: &mut dyn crate::FfiContext, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() != $arity {
                     return Err(FfiError::ArgumentCount {
                         expected: $arity,
@@ -114,20 +114,30 @@ pub fn register_string_functions(registry: &mut FfiRegistry) {
 mod tests {
     use super::*;
 
+    struct MockContext;
+    impl crate::FfiContext for MockContext {
+        fn get_this(&self) -> Option<FfiValue> {
+            None
+        }
+    }
+
     #[test]
     fn test_string_functions() {
         let mut registry = FfiRegistry::new();
         register_string_functions(&mut registry);
 
+        let mut ctx = MockContext;
+
         // Test string length
         let result = registry
-            .call("StrLength", vec![FfiValue::String("hello".to_string())])
+            .call(&mut ctx, "StrLength", vec![FfiValue::String("hello".to_string())])
             .unwrap();
         assert_eq!(result, FfiValue::Number(5.0));
 
         // Test string concat
         let result = registry
             .call(
+                &mut ctx,
                 "StrConcat",
                 vec![
                     FfiValue::String("hello".to_string()),
@@ -139,13 +149,14 @@ mod tests {
 
         // Test string upper
         let result = registry
-            .call("StrUpper", vec![FfiValue::String("hello".to_string())])
+            .call(&mut ctx, "StrUpper", vec![FfiValue::String("hello".to_string())])
             .unwrap();
         assert_eq!(result, FfiValue::String("HELLO".to_string()));
 
         // Test string split
         let result = registry
             .call(
+                &mut ctx,
                 "StrSplit",
                 vec![
                     FfiValue::String("a,b,c".to_string()),

@@ -3,29 +3,29 @@
 //! This library provides a bridge between the IonVM and external functions written in Rust.
 //! It enables the VM to call native functions for performance-critical operations and
 //! standard library functionality.
-//! 
+//!
 //! # Overview
-//! 
+//!
 //! The FFI system consists of:
 //! - [`FfiValue`] - Value types that cross the VM/native boundary
-//! - [`FfiFunction`] - Trait for implementing native functions  
+//! - [`FfiFunction`] - Trait for implementing native functions
 //! - [`FfiRegistry`] - Registry for registering and calling functions
 //! - [`bridge`] - Conversion utilities between VM and FFI values
 //! - [`stdlib`] - Standard library function implementations
-//! 
+//!
 //! # Example
-//! 
+//!
 //! ```rust
-//! use vm_ffi::{FfiRegistry, FfiFunction, FfiValue, FfiResult};
-//! 
+//! use vm_ffi::{FfiRegistry, FfiFunction, FfiValue, FfiResult, FfiContext};
+//!
 //! struct AddFunction;
-//! 
+//!
 //! impl FfiFunction for AddFunction {
-//!     fn call(&self, args: Vec<FfiValue>) -> FfiResult {
+//!     fn call(&self, _ctx: &mut dyn FfiContext, args: Vec<FfiValue>) -> FfiResult {
 //!         if args.len() != 2 {
 //!             return Err(vm_ffi::FfiError::ArgumentCount { expected: 2, got: args.len() });
 //!         }
-//!         
+//!
 //!         match (&args[0], &args[1]) {
 //!             (FfiValue::Number(a), FfiValue::Number(b)) => {
 //!                 Ok(FfiValue::Number(a + b))
@@ -33,23 +33,28 @@
 //!             _ => Err(vm_ffi::FfiError::RuntimeError("Invalid arguments".to_string()))
 //!         }
 //!     }
-//!     
+//!
 //!     fn name(&self) -> &str { "add" }
 //!     fn arity(&self) -> usize { 2 }
 //! }
-//! 
+//!
+//! struct MockContext;
+//! impl FfiContext for MockContext {
+//!     fn get_this(&self) -> Option<FfiValue> { None }
+//! }
+//!
 //! let mut registry = FfiRegistry::new();
 //! registry.register(AddFunction);
-//! 
-//! let result = registry.call("add", vec![
-//!     FfiValue::Number(1.0), 
+//!
+//! let mut ctx = MockContext;
+//! let result = registry.call(&mut ctx, "add", vec![
+//!     FfiValue::Number(1.0),
 //!     FfiValue::Number(2.0)
 //! ]);
 //! assert_eq!(result.unwrap(), FfiValue::Number(3.0));
 //! ```
-
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use num_complex::Complex64;
 
@@ -57,7 +62,7 @@ pub mod bridge;
 pub mod stdlib;
 
 /// Represents a value that can be passed between the VM and external functions
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum FfiValue {
     Number(f64),
     Boolean(bool),
@@ -69,6 +74,31 @@ pub enum FfiValue {
     Tuple(Vec<FfiValue>),
     Array(Vec<FfiValue>),
     Object(HashMap<String, FfiValue>),
+    Native(Rc<dyn std::any::Any>),
+}
+
+impl PartialEq for FfiValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FfiValue::Number(a), FfiValue::Number(b)) => a == b,
+            (FfiValue::Boolean(a), FfiValue::Boolean(b)) => a == b,
+            (FfiValue::Atom(a), FfiValue::Atom(b)) => a == b,
+            (FfiValue::String(a), FfiValue::String(b)) => a == b,
+            (FfiValue::Complex(a), FfiValue::Complex(b)) => a == b,
+            (FfiValue::Unit, FfiValue::Unit) => true,
+            (FfiValue::Undefined, FfiValue::Undefined) => true,
+            (FfiValue::Tuple(a), FfiValue::Tuple(b)) => a == b,
+            (FfiValue::Array(a), FfiValue::Array(b)) => a == b,
+            (FfiValue::Object(a), FfiValue::Object(b)) => a == b,
+            (FfiValue::Native(a), FfiValue::Native(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+/// Context passed to FFI functions to allow interaction with the VM
+pub trait FfiContext {
+    fn get_this(&self) -> Option<FfiValue>;
 }
 
 /// Result type for FFI function calls
@@ -101,8 +131,8 @@ impl std::fmt::Display for FfiError {
 impl std::error::Error for FfiError {}
 
 /// Trait for functions that can be called from the VM
-pub trait FfiFunction: Send + Sync {
-    fn call(&self, args: Vec<FfiValue>) -> FfiResult;
+pub trait FfiFunction {
+    fn call(&self, ctx: &mut dyn FfiContext, args: Vec<FfiValue>) -> FfiResult;
     fn name(&self) -> &str;
     fn arity(&self) -> usize;
     fn is_variadic(&self) -> bool {
@@ -115,7 +145,7 @@ pub trait FfiFunction: Send + Sync {
 
 /// A registry of external functions that can be called from the VM
 pub struct FfiRegistry {
-    functions: HashMap<String, Arc<dyn FfiFunction>>,
+    functions: HashMap<String, Rc<dyn FfiFunction>>,
 }
 
 impl FfiRegistry {
@@ -128,13 +158,13 @@ impl FfiRegistry {
     /// Register a new FFI function
     pub fn register<F: FfiFunction + 'static>(&mut self, function: F) {
         let name = function.name().to_string();
-        self.functions.insert(name, Arc::new(function));
+        self.functions.insert(name, Rc::new(function));
     }
 
     /// Call an FFI function by name
-    pub fn call(&self, name: &str, args: Vec<FfiValue>) -> FfiResult {
+    pub fn call(&self, ctx: &mut dyn FfiContext, name: &str, args: Vec<FfiValue>) -> FfiResult {
         match self.functions.get(name) {
-            Some(function) => function.call(args),
+            Some(function) => function.call(ctx, args),
             None => Err(FfiError::FunctionNotFound(name.to_string())),
         }
     }
@@ -227,6 +257,7 @@ impl FfiValue {
             FfiValue::Tuple(_) => "Tuple",
             FfiValue::Array(_) => "Array",
             FfiValue::Object(_) => "Object",
+            FfiValue::Native(_) => "Native",
         }
     }
 
@@ -241,7 +272,8 @@ impl FfiValue {
             FfiValue::Array(arr) => !arr.is_empty(),
             FfiValue::Object(obj) => !obj.is_empty(),
             FfiValue::Unit | FfiValue::Undefined => false,
-            FfiValue::Complex(c) => c.re != 0.0 && c.im != 0.0, // Complex is truthy if not zero
+            FfiValue::Complex(c) => c.re != 0.0 && c.im != 0.0,
+            FfiValue::Native(_) => true,
         }
     }
 }
@@ -273,11 +305,19 @@ mod tests {
     fn test_ffi_registry() {
         let mut registry = FfiRegistry::new();
 
+        struct MockContext;
+        impl FfiContext for MockContext {
+            fn get_this(&self) -> Option<FfiValue> {
+                None
+            }
+        }
+        let mut ctx = MockContext;
+
         // Test that we can list functions (should be empty)
         assert!(registry.list_functions().is_empty());
 
         // Test function not found
-        let result = registry.call("nonexistent", vec![]);
+        let result = registry.call(&mut ctx, "nonexistent", vec![]);
         assert!(matches!(result, Err(FfiError::FunctionNotFound(_))));
     }
 

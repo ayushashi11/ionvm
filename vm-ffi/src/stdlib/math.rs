@@ -8,7 +8,7 @@ macro_rules! math_function {
         pub struct $name;
 
         impl FfiFunction for $name {
-            fn call(&self, $args: Vec<FfiValue>) -> FfiResult {
+            fn call(&self, _ctx: &mut dyn crate::FfiContext, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() != $arity {
                     return Err(FfiError::ArgumentCount {
                         expected: $arity,

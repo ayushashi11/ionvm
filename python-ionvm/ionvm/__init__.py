@@ -45,8 +45,6 @@ Architecture:
     - Patterns: Structural pattern matching support
 """
 
-from ionvm_rust import Function, Instruction, IonPackBuilder, Pattern, Value
-
 from .control_flow import (
     IfElseBuilder,
     WhileThenElseBuilder,
@@ -55,6 +53,7 @@ from .control_flow import (
     create_break_instruction,
     create_continue_instruction,
 )
+from .ionvm_rust import Function, Instruction, IonPackBuilder, Pattern, Value
 
 __version__ = "0.1.0"
 __author__ = "IonVM Contributors"
