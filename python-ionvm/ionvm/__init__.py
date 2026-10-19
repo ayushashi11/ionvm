@@ -53,7 +53,7 @@ from .control_flow import (
     create_break_instruction,
     create_continue_instruction,
 )
-from .ionvm_rust import Function, Instruction, IonPackBuilder, Pattern, Value
+from .ionvm_rust import Function, Instruction, IonPackBuilder, Operand, Pattern, Value
 
 __version__ = "0.1.0"
 __author__ = "IonVM Contributors"
@@ -61,6 +61,7 @@ __license__ = "MIT"
 
 __all__ = [
     "Value",
+    "Operand",
     "Instruction",
     "Function",
     "IonPackBuilder",

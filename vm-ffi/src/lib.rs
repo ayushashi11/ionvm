@@ -64,6 +64,8 @@ pub mod stdlib;
 /// Represents a value that can be passed between the VM and external functions
 #[derive(Debug, Clone)]
 pub enum FfiValue {
+    Integer(i64),
+    Float(f64),
     Number(f64),
     Boolean(bool),
     Atom(String),
@@ -80,7 +82,15 @@ pub enum FfiValue {
 impl PartialEq for FfiValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (FfiValue::Integer(a), FfiValue::Integer(b)) => a == b,
+            (FfiValue::Float(a), FfiValue::Float(b)) => a == b,
             (FfiValue::Number(a), FfiValue::Number(b)) => a == b,
+            (FfiValue::Integer(a), FfiValue::Float(b)) => *a as f64 == *b,
+            (FfiValue::Float(a), FfiValue::Integer(b)) => *a == *b as f64,
+            (FfiValue::Integer(a), FfiValue::Number(b)) => *a as f64 == *b,
+            (FfiValue::Number(a), FfiValue::Integer(b)) => *a == *b as f64,
+            (FfiValue::Float(a), FfiValue::Number(b)) => a == b,
+            (FfiValue::Number(a), FfiValue::Float(b)) => a == b,
             (FfiValue::Boolean(a), FfiValue::Boolean(b)) => a == b,
             (FfiValue::Atom(a), FfiValue::Atom(b)) => a == b,
             (FfiValue::String(a), FfiValue::String(b)) => a == b,
@@ -130,11 +140,28 @@ impl std::fmt::Display for FfiError {
 
 impl std::error::Error for FfiError {}
 
+/// Represents the return or value type across the FFI boundary
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FfiType {
+    Any,
+    Void,
+    Int,
+    Float,
+    Boolean,
+    String,
+    Tuple,
+    Array,
+    Object,
+}
+
 /// Trait for functions that can be called from the VM
 pub trait FfiFunction {
     fn call(&self, ctx: &mut dyn FfiContext, args: Vec<FfiValue>) -> FfiResult;
     fn name(&self) -> &str;
     fn arity(&self) -> usize;
+    fn return_type(&self) -> FfiType {
+        FfiType::Any
+    }
     fn is_variadic(&self) -> bool {
         false
     }
@@ -176,6 +203,11 @@ impl FfiRegistry {
             .map(|f| (f.name(), f.arity(), f.description()))
     }
 
+    /// Get return type of a registered function
+    pub fn get_return_type(&self, name: &str) -> Option<FfiType> {
+        self.functions.get(name).map(|f| f.return_type())
+    }
+
     /// List all registered function names
     pub fn list_functions(&self) -> Vec<&str> {
         self.functions.keys().map(|s| s.as_str()).collect()
@@ -207,6 +239,28 @@ impl FfiValue {
     /// Convert to a number if possible
     pub fn as_number(&self) -> Option<f64> {
         match self {
+            FfiValue::Integer(i) => Some(*i as f64),
+            FfiValue::Float(f) => Some(*f),
+            FfiValue::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// Convert to an integer if possible
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            FfiValue::Integer(i) => Some(*i),
+            FfiValue::Float(f) => if f.fract() == 0.0 { Some(*f as i64) } else { None },
+            FfiValue::Number(n) => if n.fract() == 0.0 { Some(*n as i64) } else { None },
+            _ => None,
+        }
+    }
+
+    /// Convert to a float if possible
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            FfiValue::Float(f) => Some(*f),
+            FfiValue::Integer(i) => Some(*i as f64),
             FfiValue::Number(n) => Some(*n),
             _ => None,
         }
@@ -247,6 +301,8 @@ impl FfiValue {
     /// Get the type name as a string
     pub fn type_name(&self) -> &'static str {
         match self {
+            FfiValue::Integer(_) => "Integer",
+            FfiValue::Float(_) => "Float",
             FfiValue::Number(_) => "Number",
             FfiValue::Boolean(_) => "Boolean",
             FfiValue::Atom(_) => "Atom",
@@ -265,6 +321,8 @@ impl FfiValue {
     pub fn is_truthy(&self) -> bool {
         match self {
             FfiValue::Boolean(b) => *b,
+            FfiValue::Integer(i) => *i != 0,
+            FfiValue::Float(f) => *f != 0.0,
             FfiValue::Number(n) => *n != 0.0,
             FfiValue::Atom(s) => !s.is_empty(),
             FfiValue::String(s) => !s.is_empty(),
@@ -303,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_ffi_registry() {
-        let mut registry = FfiRegistry::new();
+        let registry = FfiRegistry::new();
 
         struct MockContext;
         impl FfiContext for MockContext {

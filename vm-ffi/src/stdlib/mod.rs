@@ -2,10 +2,16 @@
 //!
 //! This module organizes standard library functions into logical groups
 //! for better maintainability and optional inclusion.
+//! Note: String operations are handled natively in IonVM bytecode via SIMD opcodes
+//! (SUpperRR, SLowerRR, SCountByteRRR, SEqRRR, SFindRRR).
 
+pub mod chafa;
+pub mod fs;
+pub mod hash;
 pub mod io;
 pub mod math;
-pub mod string;
+pub mod os;
+pub mod time;
 
 use crate::FfiRegistry;
 
@@ -13,7 +19,11 @@ use crate::FfiRegistry;
 pub fn register_all(registry: &mut FfiRegistry) {
     math::register_math_functions(registry);
     io::register_io_functions(registry);
-    string::register_string_functions(registry);
+    time::register_time_functions(registry);
+    os::register_os_functions(registry);
+    fs::register_fs_functions(registry);
+    hash::register_hash_functions(registry);
+    chafa::register_chafa_functions(registry);
 }
 
 /// Register only math functions
@@ -26,14 +36,29 @@ pub fn register_io_only(registry: &mut FfiRegistry) {
     io::register_io_functions(registry);
 }
 
-/// Register only string functions
-pub fn register_string_only(registry: &mut FfiRegistry) {
-    string::register_string_functions(registry);
+/// Register only time functions
+pub fn register_time_only(registry: &mut FfiRegistry) {
+    time::register_time_functions(registry);
+}
+
+/// Register only OS functions
+pub fn register_os_only(registry: &mut FfiRegistry) {
+    os::register_os_functions(registry);
+}
+
+/// Register only file system functions
+pub fn register_fs_only(registry: &mut FfiRegistry) {
+    fs::register_fs_functions(registry);
+}
+
+/// Register only hash functions
+pub fn register_hash_only(registry: &mut FfiRegistry) {
+    hash::register_hash_functions(registry);
 }
 
 /// Get a list of all available modules
 pub fn available_modules() -> Vec<&'static str> {
-    vec!["math", "io", "string"]
+    vec!["math", "io", "time", "os", "fs", "hash", "chafa"]
 }
 
 /// Register functions from specific modules
@@ -42,7 +67,11 @@ pub fn register_modules(registry: &mut FfiRegistry, modules: &[&str]) {
         match *module {
             "math" => math::register_math_functions(registry),
             "io" => io::register_io_functions(registry),
-            "string" => string::register_string_functions(registry),
+            "time" => time::register_time_functions(registry),
+            "os" => os::register_os_functions(registry),
+            "fs" => fs::register_fs_functions(registry),
+            "hash" => hash::register_hash_functions(registry),
+            "chafa" => chafa::register_chafa_functions(registry),
             _ => eprintln!("Warning: Unknown module '{}'", module),
         }
     }
@@ -60,7 +89,8 @@ mod tests {
         // Check that functions from all modules are registered
         assert!(registry.get_function_info("Sqrt").is_some()); // math
         assert!(registry.get_function_info("Print").is_some()); // io
-        assert!(registry.get_function_info("StrLength").is_some()); // string
+        assert!(registry.get_function_info("OsName").is_some()); // os
+        assert!(registry.get_function_info("Crc32").is_some()); // hash
 
         let functions = registry.list_functions();
         assert!(functions.len() > 10); // Should have many functions
@@ -71,10 +101,10 @@ mod tests {
         let mut registry = FfiRegistry::new();
         register_math_only(&mut registry);
 
-        // Should have math functions but not I/O or string
+        // Should have math functions but not I/O or os
         assert!(registry.get_function_info("Sqrt").is_some());
         assert!(registry.get_function_info("Print").is_none());
-        assert!(registry.get_function_info("StrLength").is_none());
+        assert!(registry.get_function_info("OsName").is_none());
     }
 
     #[test]
@@ -84,7 +114,7 @@ mod tests {
 
         assert!(registry.get_function_info("Sqrt").is_some());
         assert!(registry.get_function_info("Print").is_none());
-        assert!(registry.get_function_info("StrLength").is_none());
+        assert!(registry.get_function_info("OsName").is_none());
     }
 
     #[test]
@@ -92,6 +122,9 @@ mod tests {
         let modules = available_modules();
         assert!(modules.contains(&"math"));
         assert!(modules.contains(&"io"));
-        assert!(modules.contains(&"string"));
+        assert!(modules.contains(&"os"));
+        assert!(modules.contains(&"fs"));
+        assert!(modules.contains(&"hash"));
+        assert!(!modules.contains(&"string"));
     }
 }

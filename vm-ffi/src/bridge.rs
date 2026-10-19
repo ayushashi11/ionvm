@@ -3,7 +3,7 @@
 //! This module provides conversion functions between the VM's value types
 //! and the FFI's value types to enable seamless integration.
 
-use crate::{FfiError, FfiResult, FfiValue};
+use crate::{FfiError, FfiValue};
 
 /// Convert from VM Value to FFI Value
 pub trait ToFfiValue {

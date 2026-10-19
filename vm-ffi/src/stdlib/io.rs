@@ -2,10 +2,7 @@
 
 use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
 use regex::Regex;
-use std::{
-    io::{self, Write},
-    process::Output,
-};
+use std::io::{self, Write};
 
 /// Macro to create I/O FFI functions
 macro_rules! io_function {
@@ -33,6 +30,10 @@ macro_rules! io_function {
 
             fn description(&self) -> Option<&str> {
                 Some($description)
+            }
+
+            fn return_type(&self) -> $crate::FfiType {
+                $crate::FfiType::Void
             }
         }
     };
@@ -65,6 +66,10 @@ macro_rules! io_function {
             fn description(&self) -> Option<&str> {
                 Some($description)
             }
+
+            fn return_type(&self) -> $crate::FfiType {
+                $crate::FfiType::Void
+            }
         }
     };
 }
@@ -72,6 +77,14 @@ macro_rules! io_function {
 /// Convert FFI value to display string
 fn format_value(value: &FfiValue) -> String {
     match value {
+        FfiValue::Integer(n) => n.to_string(),
+        FfiValue::Float(n) => {
+            if n.fract() == 0.0 && n.is_finite() {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
         FfiValue::Atom(s) => s.clone(),
         FfiValue::String(s) => s.clone(),
         FfiValue::Number(n) => {
@@ -254,6 +267,8 @@ mod tests {
 
     #[test]
     fn test_format_value() {
+        assert_eq!(format_value(&FfiValue::Integer(42)), "42");
+        assert_eq!(format_value(&FfiValue::Float(3.14)), "3.14");
         assert_eq!(format_value(&FfiValue::Number(42.0)), "42");
         assert_eq!(format_value(&FfiValue::Number(3.14)), "3.14");
         assert_eq!(
@@ -263,7 +278,7 @@ mod tests {
         assert_eq!(format_value(&FfiValue::Boolean(true)), "true");
 
         let array = FfiValue::Array(vec![
-            FfiValue::Number(1.0),
+            FfiValue::Integer(1),
             FfiValue::String("test".to_string()),
             FfiValue::Boolean(false),
         ]);

@@ -12,3 +12,8 @@ python-ionvm/ionvm.egg-info
 .gemini/**
 .venv/**
 *.so
+mesh/
+mesh_ml/
+munchausen
+*.class
+massif.*

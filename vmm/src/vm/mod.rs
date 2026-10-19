@@ -1,151 +1,322 @@
-pub mod ops;
-pub mod scheduler;
-pub mod timeout;
+pub mod frame;
+pub mod process;
+pub mod optimizer;
+pub mod executor;
+pub mod simd;
 
-use crate::value::{Function, Primitive, Process, Value};
-use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
-use timeout::TimeoutInfo;
-use vm_ffi::FfiRegistry;
+use std::sync::{Arc, Mutex, Condvar};
+use crate::bytecode::instruction::{Bytecode, OperandType};
+use crate::lang::types::Value;
+use crate::vm::frame::Frame;
+use crate::vm::process::{Process, ProcessState};
+pub use executor::ExecutionResult;
 
-// Re-export so that code using `crate::vm::{Instruction, Pattern}` keeps working
-pub use crate::instruction::{Instruction, Pattern};
+pub const PROC_REDUCTIONS: usize = 50_000;
 
-// Result returned after executing one instruction or a process slice
-#[derive(Debug, Clone, PartialEq)]
-pub enum ExecutionResult {
-    // Keep running in the same process
-    Continue,
-    // Yield to the next process voluntarily
-    Pass,
-    // Reduction budget exhausted; reschedule
-    BudgetExhausted,
-    // Blocked waiting for a message; revert IP and retry on wake
-    Blocked,
-    // Blocked on ReceiveWithTimeout; do NOT revert IP on wake
-    BlockedOnTimeout,
-    // Waiting for another process to finish (Link / Select)
-    Linked,
-    // Process exited cleanly with a return value
-    Exited(Value),
-    // Unrecoverable error in this process
-    Error(String),
+pub struct SchedulerState {
+    pub ready_queue: VecDeque<Process>,
+    pub waiting_queue: HashMap<usize, Process>,
+    pub running_mailboxes: HashMap<usize, VecDeque<Value>>,
+    pub active_processes: usize,
+    pub next_pid: usize,
+    pub last_error: Option<String>,
+}
+
+
+pub struct Scheduler {
+    pub state: Mutex<SchedulerState>,
+    pub cond: Condvar,
+    pub bytecode: Arc<Bytecode>,
+    pub function_indices: Arc<HashMap<String, usize>>,
+}
+
+impl Scheduler {
+    pub fn spawn_process(&self, func_name: &str, args: Vec<Value>) -> Result<usize, String> {
+        let fn_idx = self
+            .function_indices
+            .get(func_name)
+            .copied()
+            .ok_or_else(|| format!("function '{}' not found", func_name))?;
+
+        let mut state = self.state.lock().unwrap();
+        let pid = state.next_pid;
+        state.next_pid += 1;
+
+        let mut proc = Process::new(pid, PROC_REDUCTIONS);
+        let func = &self.bytecode.functions[fn_idx];
+        let frame = Frame::new(fn_idx, func.register_count, args, OperandType::Register(0));
+        proc.frame_stack.push(frame);
+
+        state.active_processes += 1;
+        state.ready_queue.push_back(proc);
+        self.cond.notify_one();
+        Ok(pid)
+    }
+
+    pub fn send_message(&self, target_pid: usize, msg: Value) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        // 1. Target is waiting for a message: wake it up
+        if let Some(mut target) = state.waiting_queue.remove(&target_pid) {
+            target.mailbox.push_back(msg);
+            target.state = ProcessState::Running;
+            state.ready_queue.push_back(target);
+            self.cond.notify_one();
+            return Ok(());
+        }
+        // 2. Target is in ready_queue
+        for p in state.ready_queue.iter_mut() {
+            if p.id == target_pid {
+                p.mailbox.push_back(msg);
+                return Ok(());
+            }
+        }
+        // 3. Target is currently executing on another worker thread
+        state.running_mailboxes.entry(target_pid).or_default().push_back(msg);
+        Ok(())
+    }
+}
+
+pub fn worker_loop(sched: Arc<Scheduler>) {
+    loop {
+        let mut state = sched.state.lock().unwrap();
+        while state.ready_queue.is_empty() {
+            if state.active_processes == 0 {
+                sched.cond.notify_all();
+                return;
+            }
+            state = sched.cond.wait(state).unwrap();
+            if state.active_processes == 0 && state.ready_queue.is_empty() {
+                sched.cond.notify_all();
+                return;
+            }
+        }
+
+        let mut process = state.ready_queue.pop_front().unwrap();
+        if let Some(pending) = state.running_mailboxes.remove(&process.id) {
+            process.mailbox.extend(pending);
+        }
+        drop(state);
+
+        process.reductions = PROC_REDUCTIONS;
+        let mut ctx = executor::ExecutionContext {
+            bytecode: &sched.bytecode,
+            process: &mut process,
+            scheduler: &sched,
+        };
+
+        let result = executor::fetch_and_dispatch(&mut ctx);
+
+        let mut state = sched.state.lock().unwrap();
+        if let Some(pending) = state.running_mailboxes.remove(&process.id) {
+            process.mailbox.extend(pending);
+        }
+
+        match result {
+            ExecutionResult::Continue => {
+                process.state = ProcessState::Running;
+                state.ready_queue.push_back(process);
+                sched.cond.notify_one();
+            }
+            ExecutionResult::WaitMessage => {
+                if !process.mailbox.is_empty() {
+                    process.state = ProcessState::Running;
+                    state.ready_queue.push_back(process);
+                    sched.cond.notify_one();
+                } else {
+                    process.state = ProcessState::WaitingMessage;
+                    state.waiting_queue.insert(process.id, process);
+                }
+            }
+            ExecutionResult::Terminate => {
+                process.state = ProcessState::Terminated;
+                state.active_processes = state.active_processes.saturating_sub(1);
+                if state.active_processes == 0 {
+                    sched.cond.notify_all();
+                }
+            }
+            ExecutionResult::Error(msg) => {
+                eprintln!("[Process {} error]: {}", process.id, msg);
+                if state.last_error.is_none() {
+                    state.last_error = Some(format!("Process {} error: {}", process.id, msg));
+                }
+                process.state = ProcessState::Terminated;
+                state.active_processes = state.active_processes.saturating_sub(1);
+                if state.active_processes == 0 {
+                    sched.cond.notify_all();
+                }
+            }
+        }
+    }
 }
 
 pub struct IonVM {
-    pub processes: HashMap<usize, Rc<RefCell<Process>>>,
-    pub run_queue: VecDeque<usize>,
-    pub next_pid: usize,
-    // Reduction budget granted to each process per scheduling turn.
-    // Matches the BEAM default of 2000.
-    pub reduction_budget: u32,
-    pub scheduler_passes: u64,
-    pub ffi_registry: FfiRegistry,
-    pub debug: bool,
-    pub(crate) pending_timeouts: Vec<TimeoutInfo>,
+    pub scheduler: Arc<Scheduler>,
+    pub enable_cuda: bool,
 }
 
 impl IonVM {
-    pub fn new() -> Self {
-        IonVM {
-            processes: HashMap::new(),
-            run_queue: VecDeque::new(),
-            next_pid: 1,
-            reduction_budget: 4, //2000,
-            scheduler_passes: 0,
-            ffi_registry: FfiRegistry::with_stdlib(),
-            debug: false,
-            pending_timeouts: Vec::new(),
-        }
+    pub fn new(bytecode: Bytecode) -> Result<Self, String> {
+        Self::new_with_options(bytecode, false)
     }
 
-    pub fn with_debug() -> Self {
-        let mut vm = Self::new();
-        vm.debug = true;
-        vm
-    }
+    pub fn new_with_options(mut bytecode: Bytecode, enable_cuda: bool) -> Result<Self, String> {
+        let mut function_indices = HashMap::new();
+        let mut main_idx = None;
 
-    pub fn set_debug(&mut self, enabled: bool) {
-        self.debug = enabled;
-    }
+        optimizer::optimize_bytecode(&mut bytecode);
 
-    pub fn spawn_process(&mut self, function: Rc<RefCell<Function>>, args: Vec<Value>) -> usize {
-        let pid = self.next_pid;
-        self.next_pid += 1;
-
-        if self.debug {
-            eprintln!(
-                "[VM] spawning process {} fn={:?}",
-                pid,
-                function.borrow().name.clone()
-            );
-        }
-
-        let process = Rc::new(RefCell::new(Process::new(pid, function, args)));
-        self.processes.insert(pid, process);
-        self.run_queue.push_back(pid);
-        pid
-    }
-
-    pub fn spawn_main_process(&mut self, function: Function) -> Result<Value, String> {
-        let pid = self.spawn_process(Rc::new(RefCell::new(function)), vec![]);
-
-        loop {
-            self.run();
-
-            if let Some(proc) = self.processes.get(&pid) {
-                let proc = proc.borrow();
-                if !proc.alive {
-                    return Ok(proc
-                        .last_result
-                        .clone()
-                        .unwrap_or(Value::Primitive(Primitive::Unit)));
+        for (i, func) in bytecode.functions.iter_mut().enumerate() {
+            if func.name != "main" {
+                if let Some(native_fn) = crate::jit::translator::compile_function(func) {
+                    func.jit_compiled_fn = Some(native_fn);
                 }
-            } else {
-                return Ok(Value::Primitive(Primitive::Unit));
             }
-
-            if self.run_queue.is_empty() {
-                break;
+            function_indices.insert(func.name.clone(), i);
+            if func.name == "main" {
+                main_idx = Some(i);
             }
         }
 
-        Ok(Value::Primitive(Primitive::Unit))
+        let mut jit_indices: HashMap<String, usize> = HashMap::new();
+        for (i, func) in bytecode.functions.iter().enumerate() {
+            if func.jit_compiled_fn.is_some() {
+                jit_indices.insert(func.name.clone(), i);
+            }
+        }
+
+        for func in bytecode.functions.iter_mut() {
+            for inst in func.instructions.iter_mut() {
+                if inst.opcode == crate::bytecode::opcode::Opcode::Call && !inst.operands.is_empty() {
+                    if let OperandType::Function(ref name) = inst.operands[0] {
+                        if let Some(&idx) = jit_indices.get(name) {
+                            inst.opcode = crate::bytecode::opcode::Opcode::CallJit;
+                            inst.operands[0] = OperandType::Offset(idx as i64);
+                        }
+                    }
+                }
+            }
+        }
+
+        let main_fn_index = main_idx.ok_or_else(|| "main function not found in bytecode".to_string())?;
+
+        let mut ready_queue = VecDeque::new();
+        let main_proc_id = 0;
+        let mut main_proc = Process::new(main_proc_id, PROC_REDUCTIONS);
+
+        let main_func = &bytecode.functions[main_fn_index];
+        let initial_frame = Frame::new(
+            main_fn_index,
+            main_func.register_count,
+            Vec::new(),
+            OperandType::Register(0),
+        );
+        main_proc.frame_stack.push(initial_frame);
+        ready_queue.push_back(main_proc);
+
+        let state = SchedulerState {
+            ready_queue,
+            waiting_queue: HashMap::new(),
+            running_mailboxes: HashMap::new(),
+            active_processes: 1,
+            next_pid: 1,
+            last_error: None,
+        };
+
+
+        let scheduler = Arc::new(Scheduler {
+            state: Mutex::new(state),
+            cond: Condvar::new(),
+            bytecode: Arc::new(bytecode),
+            function_indices: Arc::new(function_indices),
+        });
+
+        Ok(IonVM { scheduler, enable_cuda })
     }
 
-    // Get a named FFI function as a first-class Value
-    pub fn get_ffi_function(&self, name: &str) -> Option<Value> {
-        self.ffi_registry
-            .get_function_info(name)
-            .map(|(n, arity, _)| {
-                Value::Function(Rc::new(RefCell::new(Function::new_ffi(
-                    Some(n.to_string()),
-                    arity,
-                    n.to_string(),
-                ))))
-            })
+    pub fn spawn_process(&self, func_name: &str, args: Vec<Value>) -> Result<usize, String> {
+        self.scheduler.spawn_process(func_name, args)
     }
 
-    pub fn get_all_ffi_functions(&self) -> HashMap<String, Value> {
-        self.ffi_registry
-            .list_functions()
-            .iter()
-            .filter_map(|&name| self.get_ffi_function(name).map(|f| (name.to_string(), f)))
-            .collect()
+    pub fn send_message(&self, target_pid: usize, msg: Value) -> Result<(), String> {
+        self.scheduler.send_message(target_pid, msg)
     }
 
-    // Resolve __vm: intrinsic atoms to runtime values.
-    // Only truly dynamic values that depend on the running process belong here.
-    // __stdlib: atoms are resolved at load time by the IonPack loader instead.
-    pub(crate) fn resolve_vm_atom(&self, atom: &str, pid: usize) -> Option<Value> {
-        let cmd = atom.strip_prefix("__vm:")?;
-        Some(match cmd {
-            "self" => Value::Process(self.processes.get(&pid)?.clone()),
-            "pid" => Value::Primitive(Primitive::Number(pid as f64)),
-            "processes" => Value::Primitive(Primitive::Number(self.processes.len() as f64)),
-            "scheduler_passes" => Value::Primitive(Primitive::Number(self.scheduler_passes as f64)),
-            _ => return None,
-        })
+    pub fn step(&mut self) -> Result<bool, String> {
+        let mut state = self.scheduler.state.lock().unwrap();
+        if state.ready_queue.is_empty() {
+            return Ok(false);
+        }
+        let mut process = state.ready_queue.pop_front().unwrap();
+        if let Some(pending) = state.running_mailboxes.remove(&process.id) {
+            process.mailbox.extend(pending);
+        }
+        drop(state);
+
+        process.reductions = PROC_REDUCTIONS;
+        let mut ctx = executor::ExecutionContext {
+            bytecode: &self.scheduler.bytecode,
+            process: &mut process,
+            scheduler: &self.scheduler,
+        };
+        let result = executor::fetch_and_dispatch(&mut ctx);
+
+        let mut state = self.scheduler.state.lock().unwrap();
+        if let Some(pending) = state.running_mailboxes.remove(&process.id) {
+            process.mailbox.extend(pending);
+        }
+
+        match result {
+            ExecutionResult::Continue => {
+                process.state = ProcessState::Running;
+                state.ready_queue.push_back(process);
+            }
+            ExecutionResult::WaitMessage => {
+                if !process.mailbox.is_empty() {
+                    process.state = ProcessState::Running;
+                    state.ready_queue.push_back(process);
+                } else {
+                    process.state = ProcessState::WaitingMessage;
+                    state.waiting_queue.insert(process.id, process);
+                }
+            }
+            ExecutionResult::Terminate => {
+                process.state = ProcessState::Terminated;
+                state.active_processes = state.active_processes.saturating_sub(1);
+            }
+            ExecutionResult::Error(msg) => {
+                process.state = ProcessState::Terminated;
+                state.active_processes = state.active_processes.saturating_sub(1);
+                return Err(format!("Process {} error: {}", process.id, msg));
+            }
+        }
+        Ok(true)
     }
+
+    pub fn run(&mut self) -> Result<(), String> {
+        let cpu_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let thread_count = cpu_count.max(2);
+
+        let mut handles = Vec::with_capacity(thread_count);
+        for _ in 0..thread_count {
+            let sched = Arc::clone(&self.scheduler);
+            handles.push(std::thread::spawn(move || {
+                worker_loop(sched);
+            }));
+        }
+
+        for h in handles {
+            let _ = h.join();
+        }
+
+        let state = self.scheduler.state.lock().unwrap();
+        if let Some(err) = &state.last_error {
+            return Err(err.clone());
+        }
+
+        Ok(())
+    }
+
 }

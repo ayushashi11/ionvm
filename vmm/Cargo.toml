@@ -2,6 +2,7 @@
 name = "vmm"
 version = "0.1.0"
 edition = "2024"
+autobins = false
 
 [[bin]]
 name = "ionvm"
@@ -12,14 +13,27 @@ name = "iondis"
 path = "src/bin/iondis.rs"
 
 [[bin]]
-name = "create_sample"
-path = "src/bin/create_sample.rs"
+name = "gen_bench"
+path = "src/bin/gen_bench.rs"
 
 [[bin]]
-name = "create_ionc"
-path = "src/bin/create_ionc.rs"
+name = "bench_string_simd"
+path = "src/bin/bench_string_simd.rs"
+
+[[bin]]
+name = "mandelbrot"
+path = "src/bin/mandelbrot.rs"
+
+[[bin]]
+name = "bench_sieve"
+path = "src/bin/bench_sieve.rs"
 
 [dependencies]
+libc = "0.2"
 num-complex = "0.4.6"
 vm-ffi = { path = "../vm-ffi" }
 zip = "0.6"
+thiserror = "2.0"
+anyhow = "1.0"
+inkwell = { version = "0.10.0", features = ["llvm22-1"] }
+

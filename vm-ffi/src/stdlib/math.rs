@@ -26,6 +26,10 @@ macro_rules! math_function {
                 $arity
             }
 
+            fn return_type(&self) -> crate::FfiType {
+                crate::FfiType::Float
+            }
+
             fn description(&self) -> Option<&str> {
                 Some($description)
             }
@@ -33,19 +37,29 @@ macro_rules! math_function {
     };
 }
 
+#[inline(always)]
+fn extract_number(val: &FfiValue) -> Option<f64> {
+    match val {
+        FfiValue::Float(f) => Some(*f),
+        FfiValue::Integer(i) => Some(*i as f64),
+        FfiValue::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
 // Math functions
 math_function!(Sqrt, 1, "Square root of a number", |args| {
-    match &args[0] {
-        FfiValue::Number(n) => {
-            if *n < 0.0 {
+    match extract_number(&args[0]) {
+        Some(n) => {
+            if n < 0.0 {
                 Err(FfiError::RuntimeError(
                     "Cannot take square root of negative number".to_string(),
                 ))
             } else {
-                Ok(FfiValue::Number(n.sqrt()))
+                Ok(FfiValue::Float(n.sqrt()))
             }
         }
-        _ => Err(FfiError::ArgumentType {
+        None => Err(FfiError::ArgumentType {
             expected: "Number".to_string(),
             got: args[0].type_name().to_string(),
         }),
@@ -53,9 +67,9 @@ math_function!(Sqrt, 1, "Square root of a number", |args| {
 });
 
 math_function!(Abs, 1, "Absolute value of a number", |args| {
-    match &args[0] {
-        FfiValue::Number(n) => Ok(FfiValue::Number(n.abs())),
-        _ => Err(FfiError::ArgumentType {
+    match extract_number(&args[0]) {
+        Some(n) => Ok(FfiValue::Float(n.abs())),
+        None => Err(FfiError::ArgumentType {
             expected: "Number".to_string(),
             got: args[0].type_name().to_string(),
         }),
@@ -63,9 +77,9 @@ math_function!(Abs, 1, "Absolute value of a number", |args| {
 });
 
 math_function!(Sin, 1, "Sine of a number (in radians)", |args| {
-    match &args[0] {
-        FfiValue::Number(n) => Ok(FfiValue::Number(n.sin())),
-        _ => Err(FfiError::ArgumentType {
+    match extract_number(&args[0]) {
+        Some(n) => Ok(FfiValue::Float(n.sin())),
+        None => Err(FfiError::ArgumentType {
             expected: "Number".to_string(),
             got: args[0].type_name().to_string(),
         }),
@@ -73,9 +87,9 @@ math_function!(Sin, 1, "Sine of a number (in radians)", |args| {
 });
 
 math_function!(Cos, 1, "Cosine of a number (in radians)", |args| {
-    match &args[0] {
-        FfiValue::Number(n) => Ok(FfiValue::Number(n.cos())),
-        _ => Err(FfiError::ArgumentType {
+    match extract_number(&args[0]) {
+        Some(n) => Ok(FfiValue::Float(n.cos())),
+        None => Err(FfiError::ArgumentType {
             expected: "Number".to_string(),
             got: args[0].type_name().to_string(),
         }),
@@ -83,9 +97,9 @@ math_function!(Cos, 1, "Cosine of a number (in radians)", |args| {
 });
 
 math_function!(Floor, 1, "Floor of a number", |args| {
-    match &args[0] {
-        FfiValue::Number(n) => Ok(FfiValue::Number(n.floor())),
-        _ => Err(FfiError::ArgumentType {
+    match extract_number(&args[0]) {
+        Some(n) => Ok(FfiValue::Float(n.floor())),
+        None => Err(FfiError::ArgumentType {
             expected: "Number".to_string(),
             got: args[0].type_name().to_string(),
         }),
@@ -93,9 +107,9 @@ math_function!(Floor, 1, "Floor of a number", |args| {
 });
 
 math_function!(Ceil, 1, "Ceiling of a number", |args| {
-    match &args[0] {
-        FfiValue::Number(n) => Ok(FfiValue::Number(n.ceil())),
-        _ => Err(FfiError::ArgumentType {
+    match extract_number(&args[0]) {
+        Some(n) => Ok(FfiValue::Float(n.ceil())),
+        None => Err(FfiError::ArgumentType {
             expected: "Number".to_string(),
             got: args[0].type_name().to_string(),
         }),
@@ -103,9 +117,9 @@ math_function!(Ceil, 1, "Ceiling of a number", |args| {
 });
 
 math_function!(Round, 1, "Round a number to nearest integer", |args| {
-    match &args[0] {
-        FfiValue::Number(n) => Ok(FfiValue::Number(n.round())),
-        _ => Err(FfiError::ArgumentType {
+    match extract_number(&args[0]) {
+        Some(n) => Ok(FfiValue::Float(n.round())),
+        None => Err(FfiError::ArgumentType {
             expected: "Number".to_string(),
             got: args[0].type_name().to_string(),
         }),
@@ -113,8 +127,8 @@ math_function!(Round, 1, "Round a number to nearest integer", |args| {
 });
 
 math_function!(Max, 2, "Maximum of two numbers", |args| {
-    match (&args[0], &args[1]) {
-        (FfiValue::Number(a), FfiValue::Number(b)) => Ok(FfiValue::Number(a.max(*b))),
+    match (extract_number(&args[0]), extract_number(&args[1])) {
+        (Some(a), Some(b)) => Ok(FfiValue::Float(a.max(b))),
         _ => Err(FfiError::ArgumentType {
             expected: "Number, Number".to_string(),
             got: format!("{}, {}", args[0].type_name(), args[1].type_name()),
@@ -123,8 +137,8 @@ math_function!(Max, 2, "Maximum of two numbers", |args| {
 });
 
 math_function!(Min, 2, "Minimum of two numbers", |args| {
-    match (&args[0], &args[1]) {
-        (FfiValue::Number(a), FfiValue::Number(b)) => Ok(FfiValue::Number(a.min(*b))),
+    match (extract_number(&args[0]), extract_number(&args[1])) {
+        (Some(a), Some(b)) => Ok(FfiValue::Float(a.min(b))),
         _ => Err(FfiError::ArgumentType {
             expected: "Number, Number".to_string(),
             got: format!("{}, {}", args[0].type_name(), args[1].type_name()),
@@ -133,8 +147,8 @@ math_function!(Min, 2, "Minimum of two numbers", |args| {
 });
 
 math_function!(Pow, 2, "Raise a number to a power", |args| {
-    match (&args[0], &args[1]) {
-        (FfiValue::Number(base), FfiValue::Number(exp)) => Ok(FfiValue::Number(base.powf(*exp))),
+    match (extract_number(&args[0]), extract_number(&args[1])) {
+        (Some(base), Some(exp)) => Ok(FfiValue::Float(base.powf(exp))),
         _ => Err(FfiError::ArgumentType {
             expected: "Number, Number".to_string(),
             got: format!("{}, {}", args[0].type_name(), args[1].type_name()),
@@ -143,15 +157,15 @@ math_function!(Pow, 2, "Raise a number to a power", |args| {
 });
 
 math_function!(Log, 1, "Natural logarithm of a number", |args| {
-    match &args[0] {
-        FfiValue::Number(n) => {
-            if *n <= 0.0 {
-                Ok(FfiValue::Number(f64::NAN))
+    match extract_number(&args[0]) {
+        Some(n) => {
+            if n <= 0.0 {
+                Ok(FfiValue::Float(f64::NAN))
             } else {
-                Ok(FfiValue::Number(n.ln()))
+                Ok(FfiValue::Float(n.ln()))
             }
         }
-        _ => Err(FfiError::ArgumentType {
+        None => Err(FfiError::ArgumentType {
             expected: "Number".to_string(),
             got: args[0].type_name().to_string(),
         }),

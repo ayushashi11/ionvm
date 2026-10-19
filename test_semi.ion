@@ -1,0 +1,3 @@
+const x = 5.0;
+const f = fn(y Float): { x + y; };
+const res = f(3.0);
