@@ -21,6 +21,7 @@ pub struct SchedulerState {
     pub active_processes: usize,
     pub next_pid: usize,
     pub last_error: Option<String>,
+    pub entrypoint_return: Option<Value>,
 }
 
 
@@ -129,6 +130,9 @@ pub fn worker_loop(sched: Arc<Scheduler>) {
                 }
             }
             ExecutionResult::Terminate => {
+                if process.id == 0 {
+                    state.entrypoint_return = process.entrypoint_return.clone();
+                }
                 process.state = ProcessState::Terminated;
                 state.active_processes = state.active_processes.saturating_sub(1);
                 if state.active_processes == 0 {
@@ -161,6 +165,12 @@ impl IonVM {
     }
 
     pub fn new_with_options(mut bytecode: Bytecode, enable_cuda: bool) -> Result<Self, String> {
+        // Load external native dynamic libraries declared in bytecode metadata
+        for decl in &bytecode.native_declarations {
+            crate::builtin::native_lib::load_native_library(&decl.lib_name, &decl.namespace)
+                .map_err(|e| format!("Native library error: {}", e))?;
+        }
+
         let mut function_indices = HashMap::new();
         let mut main_idx = None;
 
@@ -221,6 +231,7 @@ impl IonVM {
             active_processes: 1,
             next_pid: 1,
             last_error: None,
+            entrypoint_return: None,
         };
 
 
@@ -319,4 +330,7 @@ impl IonVM {
         Ok(())
     }
 
+    pub fn entrypoint_return(&self) -> Option<Value> {
+        self.scheduler.state.lock().unwrap().entrypoint_return.clone()
+    }
 }

@@ -180,6 +180,8 @@ fn main() {
     let bc = Bytecode {
         functions: vec![main_fn],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let t0 = Instant::now();

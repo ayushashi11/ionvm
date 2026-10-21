@@ -9,8 +9,11 @@ pub mod chafa;
 pub mod fs;
 pub mod hash;
 pub mod io;
+pub mod json;
 pub mod math;
+pub mod net;
 pub mod os;
+pub mod string;
 pub mod time;
 
 use crate::FfiRegistry;
@@ -24,6 +27,9 @@ pub fn register_all(registry: &mut FfiRegistry) {
     fs::register_fs_functions(registry);
     hash::register_hash_functions(registry);
     chafa::register_chafa_functions(registry);
+    string::register_string_functions(registry);
+    json::register_json_functions(registry);
+    net::register_net_functions(registry);
 }
 
 /// Register only math functions
@@ -58,7 +64,7 @@ pub fn register_hash_only(registry: &mut FfiRegistry) {
 
 /// Get a list of all available modules
 pub fn available_modules() -> Vec<&'static str> {
-    vec!["math", "io", "time", "os", "fs", "hash", "chafa"]
+    vec!["math", "io", "time", "os", "fs", "hash", "chafa", "string", "json", "net"]
 }
 
 /// Register functions from specific modules
@@ -72,6 +78,9 @@ pub fn register_modules(registry: &mut FfiRegistry, modules: &[&str]) {
             "fs" => fs::register_fs_functions(registry),
             "hash" => hash::register_hash_functions(registry),
             "chafa" => chafa::register_chafa_functions(registry),
+            "string" => string::register_string_functions(registry),
+            "json" => json::register_json_functions(registry),
+            "net" => net::register_net_functions(registry),
             _ => eprintln!("Warning: Unknown module '{}'", module),
         }
     }
@@ -125,6 +134,8 @@ mod tests {
         assert!(modules.contains(&"os"));
         assert!(modules.contains(&"fs"));
         assert!(modules.contains(&"hash"));
-        assert!(!modules.contains(&"string"));
+        assert!(modules.contains(&"string"));
+        assert!(modules.contains(&"json"));
+        assert!(modules.contains(&"net"));
     }
 }

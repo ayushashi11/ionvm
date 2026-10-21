@@ -161,9 +161,38 @@ pub enum Opcode {
     IBitSet,
     IBitSet1,
     IBitSet0,
+
+    // String Formatting & Interpolation Opcodes
+    FormatValue,
+    BuildString,
+
+    // Closures
+    MakeEnv,
+
+    // Fast Immediate Arithmetic & Comparison Opcodes
+    ISubRCR,
+    ISubCRR,
+    IMulRCR,
+    IDivCRR,
+    IRemCRR,
+    IEqRCR,
+    ILtRCR,
+    ILtCRR,
+    IGtCRR,
+    FAddRCR,
+    FSubRCR,
+    FSubCRR,
+    FMulRCR,
+    FDivRCR,
+    FDivCRR,
+    FEqRCR,
+    FLtRCR,
+    FLtCRR,
+    FGtRCR,
+    FGtCRR,
 }
 
-pub const OPCODE_COUNT: usize = Opcode::IBitSet0 as usize + 1;
+pub const OPCODE_COUNT: usize = Opcode::FGtCRR as usize + 1;
 
 impl Opcode {
     pub fn as_str(&self) -> &'static str {
@@ -310,6 +339,30 @@ impl Opcode {
             Opcode::IBitSet => "I_bit_set",
             Opcode::IBitSet1 => "I_bit_set1",
             Opcode::IBitSet0 => "I_bit_set0",
+            Opcode::FormatValue => "format_value",
+            Opcode::BuildString => "build_string",
+            Opcode::MakeEnv => "make_env",
+
+            Opcode::ISubRCR => "I_sub_RCR",
+            Opcode::ISubCRR => "I_sub_CRR",
+            Opcode::IMulRCR => "I_mul_RCR",
+            Opcode::IDivCRR => "I_div_CRR",
+            Opcode::IRemCRR => "I_rem_CRR",
+            Opcode::IEqRCR => "I_eq_RCR",
+            Opcode::ILtRCR => "I_lt_RCR",
+            Opcode::ILtCRR => "I_lt_CRR",
+            Opcode::IGtCRR => "I_gt_CRR",
+            Opcode::FAddRCR => "F_add_RCR",
+            Opcode::FSubRCR => "F_sub_RCR",
+            Opcode::FSubCRR => "F_sub_CRR",
+            Opcode::FMulRCR => "F_mul_RCR",
+            Opcode::FDivRCR => "F_div_RCR",
+            Opcode::FDivCRR => "F_div_CRR",
+            Opcode::FEqRCR => "F_eq_RCR",
+            Opcode::FLtRCR => "F_lt_RCR",
+            Opcode::FLtCRR => "F_lt_CRR",
+            Opcode::FGtRCR => "F_gt_RCR",
+            Opcode::FGtCRR => "F_gt_CRR",
         }
     }
 
@@ -456,6 +509,30 @@ impl Opcode {
             "I_bit_set" => Some(Opcode::IBitSet),
             "I_bit_set1" => Some(Opcode::IBitSet1),
             "I_bit_set0" => Some(Opcode::IBitSet0),
+            "format_value" => Some(Opcode::FormatValue),
+            "build_string" => Some(Opcode::BuildString),
+            "make_env" => Some(Opcode::MakeEnv),
+
+            "I_sub_RCR" => Some(Opcode::ISubRCR),
+            "I_sub_CRR" => Some(Opcode::ISubCRR),
+            "I_mul_RCR" => Some(Opcode::IMulRCR),
+            "I_div_CRR" => Some(Opcode::IDivCRR),
+            "I_rem_CRR" => Some(Opcode::IRemCRR),
+            "I_eq_RCR" => Some(Opcode::IEqRCR),
+            "I_lt_RCR" => Some(Opcode::ILtRCR),
+            "I_lt_CRR" => Some(Opcode::ILtCRR),
+            "I_gt_CRR" => Some(Opcode::IGtCRR),
+            "F_add_RCR" => Some(Opcode::FAddRCR),
+            "F_sub_RCR" => Some(Opcode::FSubRCR),
+            "F_sub_CRR" => Some(Opcode::FSubCRR),
+            "F_mul_RCR" => Some(Opcode::FMulRCR),
+            "F_div_RCR" => Some(Opcode::FDivRCR),
+            "F_div_CRR" => Some(Opcode::FDivCRR),
+            "F_eq_RCR" => Some(Opcode::FEqRCR),
+            "F_lt_RCR" => Some(Opcode::FLtRCR),
+            "F_lt_CRR" => Some(Opcode::FLtCRR),
+            "F_gt_RCR" => Some(Opcode::FGtRCR),
+            "F_gt_CRR" => Some(Opcode::FGtCRR),
             _ => None,
         }
     }

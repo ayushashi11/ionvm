@@ -105,9 +105,10 @@ pub enum FunctionType {
     Regular,
     Native,
     Ffi(String),
+    Closure,
 }
 
-pub type NativeJitFn = unsafe extern "C" fn(registers: *mut Value, args: *const Value, out_res: *mut Value);
+pub type NativeJitFn = unsafe extern "C" fn(registers: *mut Value, args: *const Value, env: *mut Value, out_res: *mut Value);
 
 #[derive(Clone, Debug)]
 pub struct Function {
@@ -120,6 +121,7 @@ pub struct Function {
     pub fn_type: FunctionType,
     pub call_counter: usize,
     pub jit_compiled_fn: Option<NativeJitFn>,
+    pub closure_env: Option<Arc<RwLock<Vec<Value>>>>,
 }
 
 impl PartialEq for Function {
@@ -131,6 +133,11 @@ impl PartialEq for Function {
             && self.return_type == other.return_type
             && self.bound_this == other.bound_this
             && self.fn_type == other.fn_type
+            && match (&self.closure_env, &other.closure_env) {
+                (None, None) => true,
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || *a.read().unwrap() == *b.read().unwrap(),
+                _ => false,
+            }
     }
 }
 
@@ -152,6 +159,7 @@ impl Function {
             fn_type,
             call_counter: 0,
             jit_compiled_fn: None,
+            closure_env: None,
         }
     }
 
@@ -162,14 +170,7 @@ impl Function {
 }
 
 
-#[derive(Clone, PartialEq, Debug)]
-pub enum Pattern {
-    Wildcard,
-    Literal(Value),
-    Bind(usize),
-    Tuple(Vec<Pattern>),
-    Object(Vec<(String, Pattern)>),
-}
+pub use crate::lang::matcher::{ArrayPattern, ListSegment, Pattern};
 
 #[repr(C, u8)]
 #[derive(Clone, Debug)]

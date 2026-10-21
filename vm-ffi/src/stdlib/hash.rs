@@ -1,10 +1,10 @@
 //! Hashing functions for the standard library
 
-use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue, RawFfiFunction};
 
 pub struct Fnv1a64;
 
-impl FfiFunction for Fnv1a64 {
+impl RawFfiFunction for Fnv1a64 {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 1 {
             return Err(FfiError::ArgumentCount {
@@ -31,7 +31,7 @@ impl FfiFunction for Fnv1a64 {
             hash = hash.wrapping_mul(FNV_PRIME);
         }
 
-        Ok(FfiValue::Number((hash as i64) as f64))
+        Ok(FfiValue::Number((hash as i64) as f64).into())
     }
 
     fn name(&self) -> &str {
@@ -47,9 +47,11 @@ impl FfiFunction for Fnv1a64 {
     }
 }
 
+impl FfiFunction for Fnv1a64 {}
+
 pub struct Crc32;
 
-impl FfiFunction for Crc32 {
+impl RawFfiFunction for Crc32 {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 1 {
             return Err(FfiError::ArgumentCount {
@@ -77,7 +79,7 @@ impl FfiFunction for Crc32 {
             }
         }
         let final_crc = !crc;
-        Ok(FfiValue::Number(final_crc as f64))
+        Ok(FfiValue::Number(final_crc as f64).into())
     }
 
     fn name(&self) -> &str {
@@ -92,6 +94,8 @@ impl FfiFunction for Crc32 {
         Some("Compute CRC-32 (IEEE 802.3) checksum of string")
     }
 }
+
+impl FfiFunction for Crc32 {}
 
 pub fn register_hash_functions(registry: &mut FfiRegistry) {
     registry.register(Fnv1a64);
@@ -124,6 +128,6 @@ mod tests {
         let res = registry
             .call(&mut ctx, "Fnv1a64", vec![FfiValue::String("hello".to_string())])
             .unwrap();
-        assert!(matches!(res, FfiValue::Number(_)));
+        assert!(matches!(res, crate::FfiReturn::Value(FfiValue::Number(_))));
     }
 }

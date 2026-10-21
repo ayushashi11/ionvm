@@ -8,13 +8,22 @@ pub fn compile_function(func: &Function) -> Option<NativeJitFn> {
             Opcode::IAddRRR
             | Opcode::IAddRCR
             | Opcode::ISubRRR
+            | Opcode::ISubRCR
+            | Opcode::ISubCRR
             | Opcode::IMulRRR
+            | Opcode::IMulRCR
             | Opcode::IDivRCR
+            | Opcode::IDivCRR
             | Opcode::IRemRCR
+            | Opcode::IRemCRR
             | Opcode::IEqRRR
+            | Opcode::IEqRCR
             | Opcode::ILtRRR
+            | Opcode::ILtRCR
+            | Opcode::ILtCRR
             | Opcode::IGtRRR
             | Opcode::IGtRCR
+            | Opcode::IGtCRR
             | Opcode::IGtJmpRR
             | Opcode::IGtJmpRC
             | Opcode::ILtJmpRR
@@ -25,12 +34,23 @@ pub fn compile_function(func: &Function) -> Option<NativeJitFn> {
             | Opcode::IJumpFalseR
             | Opcode::AGetIndexAR
             | Opcode::FAddRRR
+            | Opcode::FAddRCR
             | Opcode::FSubRRR
+            | Opcode::FSubRCR
+            | Opcode::FSubCRR
             | Opcode::FMulRRR
+            | Opcode::FMulRCR
             | Opcode::FDivRRR
+            | Opcode::FDivRCR
+            | Opcode::FDivCRR
             | Opcode::FEqRRR
+            | Opcode::FEqRCR
             | Opcode::FLtRRR
+            | Opcode::FLtRCR
+            | Opcode::FLtCRR
             | Opcode::FGtRRR
+            | Opcode::FGtRCR
+            | Opcode::FGtCRR
             | Opcode::FGtJmpRR
             | Opcode::FGtJmpRC
             | Opcode::FLtJmpRR
@@ -38,6 +58,8 @@ pub fn compile_function(func: &Function) -> Option<NativeJitFn> {
             | Opcode::LoadConst
             | Opcode::Ret
             | Opcode::Eq
+            | Opcode::Lt
+            | Opcode::Gt
             | Opcode::JumpTrue
             | Opcode::JumpFalse
             | Opcode::Jump
@@ -72,7 +94,12 @@ pub fn compile_function(func: &Function) -> Option<NativeJitFn> {
             | Opcode::IBitGet
             | Opcode::IBitSet
             | Opcode::IBitSet1
-            | Opcode::IBitSet0 => {}
+            | Opcode::IBitSet0
+            | Opcode::Match
+            | Opcode::ETagSwitch
+            | Opcode::ETagJmpRC
+            | Opcode::AMatchFast
+            | Opcode::Nop => {}
             _ => {
                 return None;
             }
@@ -88,13 +115,22 @@ pub fn compile_function_with_ir(func: &Function) -> Option<(NativeJitFn, String)
             Opcode::IAddRRR
             | Opcode::IAddRCR
             | Opcode::ISubRRR
+            | Opcode::ISubRCR
+            | Opcode::ISubCRR
             | Opcode::IMulRRR
+            | Opcode::IMulRCR
             | Opcode::IDivRCR
+            | Opcode::IDivCRR
             | Opcode::IRemRCR
+            | Opcode::IRemCRR
             | Opcode::IEqRRR
+            | Opcode::IEqRCR
             | Opcode::ILtRRR
+            | Opcode::ILtRCR
+            | Opcode::ILtCRR
             | Opcode::IGtRRR
             | Opcode::IGtRCR
+            | Opcode::IGtCRR
             | Opcode::IGtJmpRR
             | Opcode::IGtJmpRC
             | Opcode::ILtJmpRR
@@ -105,12 +141,23 @@ pub fn compile_function_with_ir(func: &Function) -> Option<(NativeJitFn, String)
             | Opcode::IJumpFalseR
             | Opcode::AGetIndexAR
             | Opcode::FAddRRR
+            | Opcode::FAddRCR
             | Opcode::FSubRRR
+            | Opcode::FSubRCR
+            | Opcode::FSubCRR
             | Opcode::FMulRRR
+            | Opcode::FMulRCR
             | Opcode::FDivRRR
+            | Opcode::FDivRCR
+            | Opcode::FDivCRR
             | Opcode::FEqRRR
+            | Opcode::FEqRCR
             | Opcode::FLtRRR
+            | Opcode::FLtRCR
+            | Opcode::FLtCRR
             | Opcode::FGtRRR
+            | Opcode::FGtRCR
+            | Opcode::FGtCRR
             | Opcode::FGtJmpRR
             | Opcode::FGtJmpRC
             | Opcode::FLtJmpRR
@@ -118,6 +165,8 @@ pub fn compile_function_with_ir(func: &Function) -> Option<(NativeJitFn, String)
             | Opcode::LoadConst
             | Opcode::Ret
             | Opcode::Eq
+            | Opcode::Lt
+            | Opcode::Gt
             | Opcode::JumpTrue
             | Opcode::JumpFalse
             | Opcode::Jump
@@ -152,7 +201,12 @@ pub fn compile_function_with_ir(func: &Function) -> Option<(NativeJitFn, String)
             | Opcode::IBitGet
             | Opcode::IBitSet
             | Opcode::IBitSet1
-            | Opcode::IBitSet0 => {}
+            | Opcode::IBitSet0
+            | Opcode::Match
+            | Opcode::ETagSwitch
+            | Opcode::ETagJmpRC
+            | Opcode::AMatchFast
+            | Opcode::Nop => {}
             _ => {
                 return None;
             }

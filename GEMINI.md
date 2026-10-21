@@ -6,10 +6,13 @@
 IonVM is a research virtual machine written in Rust, designed for **actor-model concurrency**. It features a preemptive scheduler, prototype-based objects, and a custom bytecode format.
 
 ## Strategic Code Map
-- **Scheduler & Core VM:** `vmm/src/vm/` (The heartbeat of the system)
-- **Instruction Set:** `vmm/src/instruction.rs` (The "API" of the VM)
-- **Data Model:** `vmm/src/value/` (How everything is stored)
-- **FFI Layer:** `vm-ffi/` (Integration with native code/Python)
+- **Scheduler & Core VM:** `vmm/src/vm/` (Preemptive scheduler, tail-call dispatch loop)
+- **JIT Compiler:** `vmm/src/jit/` (LLVM JIT with loop/SLP auto-vectorization)
+- **Instruction Set:** `vmm/src/bytecode/` (Instruction and Opcode definitions)
+- **Data Model & Pattern Matching:** `vmm/src/lang/` (Value enum, unboxed arrays, pattern matching engine `matcher.rs`, string formatter `format.rs`)
+- **Native Extension Loader & C-ABI:** `vmm/src/builtin/native/` (Dynamic plugin loader, C-ABI fibers, foreign interop)
+- **FFI Layer & Stdlib:** `vm-ffi/` (RawFfiFunction, FfiFunction inheritance, native Rust coroutines, standard library)
+- **Native C Headers:** `include/ion_c_abi.h` (C-ABI plugin header for external shared libraries)
 - **Frontend/Compiler:** `mesh/` (The high-level language research area)
 - **Python Bindings:** `python-ionvm/` (Tooling and bytecode generation)
 

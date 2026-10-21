@@ -102,6 +102,25 @@ To eliminate pointer chasing and dynamic typing overhead:
 - `Value::FloatArray(Arc<RwLock<Vec<f64>>>)`: Direct contiguous vector of 64-bit floating-point numbers.
 - `Value::Array(Arc<RwLock<Vec<Value>>>)`: General heterogeneous dynamic array.
 
+### 3.3 Pattern Matching Engine (`vmm/src/lang/matcher.rs`)
+IonVM includes a dedicated pattern matching module supporting rich language destructuring:
+- **Literals & Wildcards:** `Pattern::Wildcard`, `Pattern::Literal(Value)`, `Pattern::Bind(reg)`.
+- **Interval & Range Patterns:**
+  - `Pattern::IntRange(Option<i64>, Option<i64>, bool)`: Matches integer ranges (`start..end`, `start..=end`, `..end`, `start..`).
+  - `Pattern::FloatRange(Option<f64>, Option<f64>, bool)`: Matches float ranges.
+- **Array Destructuring & List Decomposition:**
+  - `Pattern::Array(ArrayPattern)`: Polymorphic array pattern matching any array value (`Value::Array`, `Value::IntArray`, `Value::FloatArray`).
+  - `Pattern::IntArray(ArrayPattern)`: Strictly matches only `Value::IntArray`.
+  - `Pattern::FloatArray(ArrayPattern)`: Strictly matches only `Value::FloatArray`.
+  - **Segments (`ListSegment`):**
+    - `Element(Pattern)`: Matches a single item.
+    - `Elements(Vec<Pattern>)`: Matches a sequence of fixed items.
+    - `BindList(reg)`: Matches a variable slice of elements (`..a`), slicing the underlying array into a new unboxed array and binding to `reg`.
+    - `WildcardList`: Matches a variable slice (`..`) without binding.
+  - **Deterministic Partitioning:** For multi-slice patterns like `[..a | b | ..c]`, fixed elements are resolved and remaining elements are distributed deterministically across variable segments ($R / V$).
+- **Object & Tuple Patterns:** `Pattern::Object(Vec<(String, Pattern)>)`, `Pattern::Tuple(Vec<Pattern>)`.
+- **Instruction Integration:** `Opcode::Match` evaluates pattern cases, writes variable bindings into `frame.registers`, and branches to the corresponding offset.
+
 ---
 
 ## 4. Optimization Pipeline (`vmm/src/vm/optimizer.rs`)
@@ -124,7 +143,64 @@ The optimization pass runs on functions before execution:
 
 ---
 
-## 5. Source Tree Layout
+## 5. Native Extension & FFI Architecture
+
+IonVM features a multi-tiered Foreign Function Interface (FFI) supporting high-performance Rust native extensions as well as polyglot C-ABI shared libraries (C, C++, Fortran, Pascal).
+
+```
+                      ┌───────────────────────────────────────────┐
+                      │            IonVM Bytecode Engine          │
+                      └─────────────────────┬─────────────────────┘
+                                            │ Call FFI
+                                            ▼
+                      ┌───────────────────────────────────────────┐
+                      │          FfiRegistry (vm-ffi)             │
+                      └──────────────┬────────────────────────────┘
+                                     │
+           ┌─────────────────────────┴─────────────────────────┐
+           │                                                   │
+           ▼                                                   ▼
+┌─────────────────────────────────┐         ┌─────────────────────────────────┐
+│     Rust Native Extensions      │         │   Foreign C-ABI Dynamic Plugins │
+│ (vm-ffi stdlib / coroutines)    │         │ (C, C++, Fortran, Pascal, D)    │
+├─────────────────────────────────┤         ├─────────────────────────────────┤
+│ • Trait: FfiFunction            │         │ • Trait: RawFfiFunction         │
+│ • Subtrait of RawFfiFunction    │         │ • Exact 9-slot C++ vtable match │
+│ • Native #[coroutine] closure   │         │ • IonCValue tagged union (16B)  │
+│ • Zero-overhead state machine   │         │ • Dedicated C fiber stack       │
+│ • 0 assembly / 0 OS fibers      │         │ • Assembly switch_context       │
+└─────────────────────────────────┘         └─────────────────────────────────┘
+```
+
+### 5.1 Two-Tier Trait Hierarchy (`RawFfiFunction` vs `FfiFunction`)
+- **`RawFfiFunction`**: The base trait preserving binary C++ vtable equivalence (`drop`, `size`, `align`, `call`, `name`, `arity`, `return_type`, `is_variadic`, `description`). Foreign C++ classes implementing this interface can be transmuted directly into `&dyn RawFfiFunction`.
+- **`FfiFunction: RawFfiFunction`**: Directly inherits from `RawFfiFunction`, adding generator resumption methods (`resume(&self, ctx, input) -> FfiResult`, `is_resumable(&self) -> bool`). Stdlib modules and Rust functions implement both, allowing custom generators without altering the low-level C++ vtable.
+
+### 5.2 Zero-Assembly Native Rust Generators (`FfiCoroutineFunction`)
+Unlike foreign C functions that require stack manipulation, native Rust generator functions utilize nightly `#![feature(coroutines, coroutine_trait)]`. 
+- `FfiCoroutineFunction<F>` captures a `#[coroutine]` closure.
+- On invocation, the closure compiles to a compiler-generated heap/stack state machine.
+- Each `yield` produces an `FfiResult`, and `resume` drives the state machine forward with zero assembly and zero OS fiber overhead.
+
+### 5.3 Foreign Language C-ABI Plugin Architecture (`IonCFunction`)
+For compiled languages like C, C++, Fortran, and Pascal:
+- Plugins export `IONVM_PLUGIN_MAGIC = 0x494F4E56` and `ionvm_plugin_init`.
+- Arguments and return values are marshaled via `IonCValue` (16-byte tagged union).
+- **C Fibers (`vmm/src/builtin/native/fiber.rs`)**: Because native C functions do not have compiler-generated state machines, yielding back to the VM (`ion_c_yield`) is supported via lightweight fiber stacks. The VM saves/restores callee-saved registers (`switch_context`) and dispatches the callback in the VM before switching back into the C execution context.
+
+### 5.4 Cooperative VM FFI Return Handling (`FfiReturn`)
+When an FFI function returns:
+1. `FfiReturn::Value(val)`: Value is written immediately to the VM target register.
+2. `FfiReturn::Callback { target, args }`: The VM scheduler temporarily pauses the current frame, looks up `target` in `FfiRegistry`, executes it, and assigns the result to the destination register.
+3. `FfiReturn::WaitAndCheck { target, args, timeout_ms }`: The VM cooperatively polls `target` until it returns a truthy or non-unit value, or the timeout expires.
+
+### 5.5 Dynamic Shared Library & In-Memory Loading (`loader.rs`)
+- Loads shared objects (`.so`, `.dylib`, `.dll`) via `libloading`.
+- Supports in-memory dynamic loading using `memfd_create` and `/proc/self/fd/<fd>`, enabling dynamically generated or unpacked native plugins without persistent temporary files.
+
+---
+
+## 6. Source Tree Layout
 
 - `vmm/src/bytecode/opcode.rs`: Full `Opcode` enumeration (110 opcodes) with string conversions.
 - `vmm/src/bytecode/instruction.rs`: `Instruction`, `OperandType`, and `Bytecode` structures.
@@ -136,5 +212,8 @@ The optimization pass runs on functions before execution:
 - `vmm/src/vm/simd.rs`: Hardware SIMD and AVX-512 accelerated numerical kernels.
 - `vmm/src/jit/llvm_translator.rs`: LLVM IR code generator and JIT compilation engine.
 - `vmm/src/jit/translator.rs`: JIT eligibility verifier and compilation interface.
-- `vm-ffi/`: Foreign Function Interface and modular standard library bridge.
+- `vmm/src/builtin/native/`: Polyglot C-ABI plugins, assembly fiber switching, and dynamic shared library loader.
+- `vm-ffi/`: Foreign Function Interface, Rust coroutine generators, and modular standard library bridge.
+- `include/ion_c_abi.h`: Standard C/C++ header for native IonVM plugin development.
 - `docs/SAFETY.md`: Complete audit of all `unsafe` blocks, invariants, failure modes, and mitigations.
+

@@ -18,7 +18,10 @@ To achieve maximum throughput and sub-millisecond execution times, IonVM uses Ru
 | `vmm/src/vm/executor.rs` | Zero-copy JIT argument marshaling and C-ABI function dispatch | Frame stack lifetime, uninitialized buffer safety | High |
 | `vmm/src/jit/llvm_translator.rs` | LLVM GEP calculations, native JIT execution, and C-ABI helper callbacks | Memory layout alignment, lock guard lifetime | High |
 | `vmm/src/builtin/net.rs` | Direct libc POSIX socket calls (`socket`, `bind`, `read`, `write`, `close`) | OS file descriptor lifecycle | Low–Medium |
-| `vm-ffi/` | External function interface and standard library bridge | Type conversions, argument boundary enforcement | Safe (0 unsafe blocks) |
+| `vmm/src/builtin/native/loader.rs` | Dynamic plugin loading via `libloading` and anonymous in-memory `memfd_create` | Library lifecycle, symbol signature validation | High |
+| `vmm/src/builtin/native/fiber.rs` | Raw x86_64 assembly stack-switching (`switch_context`) for C-ABI coroutines | Callee-saved register restore, 16-byte stack alignment | High |
+| `vmm/src/builtin/native/c_abi.rs` | Tagged union marshaling (`IonCValue`) and raw C-string pointer conversions | NUL-terminated strings, union tag validation | Medium |
+| `vm-ffi/` | External function interface, Rust coroutine generators, stdlib | Safe state machines (`#[coroutine]`), argument checking | Safe (0 unsafe in core) |
 
 ---
 
@@ -149,7 +152,43 @@ To achieve maximum throughput and sub-millisecond execution times, IonVM uses Ru
 
 ---
 
-## 6. Actionable Safety Recommendations
+## 6. Native Plugins & C-ABI Fibers (`vmm/src/builtin/native/`)
+
+### 6.1 Assembly Fiber Context Switching (`fiber.rs`)
+- **Code Location**: `vmm/src/builtin/native/fiber.rs` (`switch_context`, `fiber_entry_trampoline`).
+- **Assembly Routine (`switch_context`)**:
+  ```asm
+  pushq %rbp; pushq %rbx; pushq %r12; pushq %r13; pushq %r14; pushq %r15
+  movq %rsp, (%rdi)
+  movq (%rsi), %rsp
+  popq %r15; popq %r14; popq %r13; popq %r12; popq %rbx; popq %rbp
+  ret
+  ```
+- **Safety Invariants**:
+  - **Callee-Saved Registers**: The System V AMD64 ABI mandates that `%rbp`, `%rbx`, `%r12`, `%r13`, `%r14`, and `%r15` are callee-saved. All 6 registers are pushed onto the current stack before the stack pointer is updated, and popped in reverse order upon resumption.
+  - **16-Byte Stack Alignment**: On x86_64, the stack must be 16-byte aligned before executing `call` instructions. The initial stack pointer setup in `Fiber::new` aligns the allocated buffer to a 16-byte boundary and adjusts for the fake return address and pushed register frames.
+  - **Direction Flag**: The direction flag (`DF`) is cleared (`cld`) prior to any C function execution to prevent string instruction corruption (`rep stosb` / `rep movsb`).
+- **Potential Failure Modes**:
+  - **Stack Overflow**: The native C function executes on an allocated heap stack (default 512 KB to 2 MB). Unbounded recursion in foreign C code could overflow the fiber stack and corrupt heap memory.
+  - *Mitigation*: A memory guard page can be mapped with `mprotect(PROT_NONE)` at the base of the allocated stack to trigger a deterministic `SIGSEGV` instead of silent heap corruption.
+  - **Thread Migration**: Fibers hold CPU register state tied to the calling thread. A fiber must never be resumed on a different OS thread than the one on which it suspended without synchronizing TLS and thread-local state.
+
+### 6.2 Dynamic Shared Library Loading (`loader.rs`)
+- **Code Location**: `vmm/src/builtin/native/loader.rs` (`load_shared_library`, `load_in_memory_library`).
+- **Safety Invariants**:
+  - **Magic Verification**: Before inspecting plugin symbols, the loader verifies that `IONVM_PLUGIN_MAGIC == 0x494F4E56`. This prevents executing arbitrary shared libraries that do not conform to IonVM's plugin specification.
+  - **Handle Lifetime Pinning**: Loaded `libloading::Library` handles are permanently held in a global `Mutex<Vec<Library>>` (`REGISTERED_HANDLES`). Handles are never dropped while the VM process is alive, preventing use-after-free or invalid instruction execution from unmapped `.text` pages.
+  - **Anonymous In-Memory Loading**: When loading raw binary ELF shared objects, `memfd_create` is used with `fcntl(F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW)` to prevent concurrent modification of the executable image in memory.
+
+### 6.3 Contrast: Safe Rust Coroutines (`vm-ffi`)
+Unlike foreign C functions that require manual stack manipulation and assembly context switching, native Rust generator functions implemented via `vm_ffi::FfiCoroutineFunction` use Rust's native `#[coroutine]` language feature:
+- Coroutine closures are transformed by the Rust compiler into 100% safe, type-checked enum state machines.
+- All local variables across `yield` points are stored within the compiler-generated generator struct.
+- There is zero assembly, zero stack pointer swapping, and zero possibility of stack corruption or register leakage.
+
+---
+
+## 7. Actionable Safety Recommendations
 
 1. **Arg-Count Guard in Executor**:
    Add an explicit check in `op_call_jit` and `run_compiled_function`:
@@ -158,7 +197,10 @@ To achieve maximum throughput and sub-millisecond execution times, IonVM uses Ru
        return ExecutionResult::Error("JIT call supports at most 8 arguments".to_string());
    }
    ```
-2. **Safe Array Memory Pinning**:
+2. **Fiber Stack Guard Pages**:
+   Allocate fiber stacks via `mmap` with a 4KB `PROT_NONE` guard page at the stack bottom to trap stack overflows deterministically.
+3. **Safe Array Memory Pinning**:
    Ensure `vm_get_intarray_data_ptr` either retains the read lock across the JIT invocation or only operates on immutable / frozen array constants.
-3. **Socket Descriptor Table**:
+4. **Socket Descriptor Table**:
    Wrap raw network sockets in a managed `Process`-owned handle table to prevent arbitrary descriptor closure.
+

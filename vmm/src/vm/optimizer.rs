@@ -795,12 +795,7 @@ fn transform_loop_to_simd(
                     } else { None }
                 } else { None }
             }
-            Opcode::Call => {
-                if let Some(OperandType::Register(r)) = inst.operands.last() {
-                    Some(*r)
-                } else { None }
-            }
-            _ => None,
+            _ => return false,
         };
 
         if let Some(r) = dst_reg {

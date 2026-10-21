@@ -4,7 +4,7 @@ use image::{DynamicImage, RgbImage};
 use std::io::{self, Write};
 use std::process::Command;
 
-use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue, RawFfiFunction};
 
 fn extract_raw_bytes(arg: &FfiValue, expected_len: usize) -> Result<Vec<u8>, FfiError> {
     match arg {
@@ -30,7 +30,7 @@ fn extract_raw_bytes(arg: &FfiValue, expected_len: usize) -> Result<Vec<u8>, Ffi
 
 pub struct ChafaRender;
 
-impl FfiFunction for ChafaRender {
+impl RawFfiFunction for ChafaRender {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() < 5 {
             return Err(FfiError::ArgumentCount {
@@ -88,7 +88,7 @@ impl FfiFunction for ChafaRender {
             }
             if let Ok(output) = child.wait_with_output() {
                 if !output.stdout.is_empty() {
-                    return Ok(FfiValue::String(String::from_utf8_lossy(&output.stdout).to_string()));
+                    return Ok(FfiValue::String(String::from_utf8_lossy(&output.stdout).to_string()).into());
                 }
             }
         }
@@ -119,7 +119,7 @@ impl FfiFunction for ChafaRender {
             ansi.push_str("\x1b[0m\n");
         }
 
-        Ok(FfiValue::String(ansi))
+        Ok(FfiValue::String(ansi).into())
     }
 
     fn name(&self) -> &str {
@@ -139,9 +139,11 @@ impl FfiFunction for ChafaRender {
     }
 }
 
+impl FfiFunction for ChafaRender {}
+
 pub struct ChafaPrint;
 
-impl FfiFunction for ChafaPrint {
+impl RawFfiFunction for ChafaPrint {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() < 5 {
             return Err(FfiError::ArgumentCount {
@@ -184,18 +186,18 @@ impl FfiFunction for ChafaPrint {
             };
             if viuer::print(&dyn_img, &conf).is_ok() {
                 let _ = io::stdout().flush();
-                return Ok(FfiValue::Unit);
+                return Ok(FfiValue::Unit.into());
             }
         }
 
         // Attempt 2: Fall back to ChafaRender ANSI
         let render_fn = ChafaRender;
         let res = render_fn.call(_ctx, args)?;
-        if let FfiValue::String(ref s) = res {
+        if let Some(FfiValue::String(s)) = res.as_value() {
             print!("{}", s);
             let _ = io::stdout().flush();
         }
-        Ok(FfiValue::Unit)
+        Ok(FfiValue::Unit.into())
     }
 
     fn name(&self) -> &str {
@@ -211,9 +213,11 @@ impl FfiFunction for ChafaPrint {
     }
 }
 
+impl FfiFunction for ChafaPrint {}
+
 pub struct DisplayImage;
 
-impl FfiFunction for DisplayImage {
+impl RawFfiFunction for DisplayImage {
     fn call(&self, ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         let print_fn = ChafaPrint;
         print_fn.call(ctx, args)
@@ -232,9 +236,11 @@ impl FfiFunction for DisplayImage {
     }
 }
 
+impl FfiFunction for DisplayImage {}
+
 pub struct ReadInput;
 
-impl FfiFunction for ReadInput {
+impl RawFfiFunction for ReadInput {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if !args.is_empty() {
             if let FfiValue::String(ref prompt) = args[0] {
@@ -244,7 +250,7 @@ impl FfiFunction for ReadInput {
         }
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
-            Ok(_) => Ok(FfiValue::String(input.trim().to_lowercase())),
+            Ok(_) => Ok(FfiValue::String(input.trim().to_lowercase()).into()),
             Err(e) => Err(FfiError::RuntimeError(format!("stdin error: {}", e))),
         }
     }
@@ -270,9 +276,11 @@ impl FfiFunction for ReadInput {
     }
 }
 
+impl FfiFunction for ReadInput {}
+
 pub struct ReadKey;
 
-impl FfiFunction for ReadKey {
+impl RawFfiFunction for ReadKey {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if !args.is_empty() {
             if let FfiValue::String(ref prompt) = args[0] {
@@ -283,17 +291,17 @@ impl FfiFunction for ReadKey {
         let term = console::Term::stdout();
         if term.is_term() {
             match term.read_char() {
-                Ok(c) => Ok(FfiValue::String(c.to_lowercase().to_string())),
+                Ok(c) => Ok(FfiValue::String(c.to_lowercase().to_string()).into()),
                 Err(_) => {
                     let mut input = String::new();
                     let _ = io::stdin().read_line(&mut input);
-                    Ok(FfiValue::String(input.trim().to_lowercase()))
+                    Ok(FfiValue::String(input.trim().to_lowercase()).into())
                 }
             }
         } else {
             let mut input = String::new();
             let _ = io::stdin().read_line(&mut input);
-            Ok(FfiValue::String(input.trim().to_lowercase()))
+            Ok(FfiValue::String(input.trim().to_lowercase()).into())
         }
     }
 
@@ -318,6 +326,8 @@ impl FfiFunction for ReadKey {
     }
 }
 
+impl FfiFunction for ReadKey {}
+
 pub fn register_chafa_functions(registry: &mut FfiRegistry) {
     registry.register(ChafaRender);
     registry.register(ChafaPrint);
@@ -329,6 +339,7 @@ pub fn register_chafa_functions(registry: &mut FfiRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FfiReturn;
 
     struct MockContext;
     impl crate::FfiContext for MockContext {
@@ -369,7 +380,7 @@ mod tests {
             .unwrap();
 
         match res {
-            FfiValue::String(ansi) => {
+            FfiReturn::Value(FfiValue::String(ansi)) => {
                 assert!(!ansi.is_empty(), "Chafa output must not be empty");
             }
             _ => panic!("Expected string ANSI output"),

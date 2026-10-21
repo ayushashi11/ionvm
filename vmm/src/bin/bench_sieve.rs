@@ -104,6 +104,8 @@ pub fn build_sieve_bytecode(limit: i64) -> Bytecode {
     Bytecode {
         functions: vec![main_fn, kernel],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     }
 }
 
@@ -226,7 +228,7 @@ fn main() {
 
         let t0 = Instant::now();
         unsafe {
-            jit_fn(registers.as_mut_ptr(), args.as_ptr(), &mut result as *mut Value);
+            jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
         }
         let jit_time = t0.elapsed().as_secs_f64();
         let jit_count = match result {

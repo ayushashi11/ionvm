@@ -37,3 +37,6 @@ thiserror = "2.0"
 anyhow = "1.0"
 inkwell = { version = "0.10.0", features = ["llvm22-1"] }
 
+[build-dependencies]
+vm-ffi = { path = "../vm-ffi" }
+

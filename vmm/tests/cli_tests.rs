@@ -88,6 +88,8 @@ fn test_cli_missing_main() {
             FunctionType::Regular,
         )],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut file = std::fs::File::create(&bc_path).expect("create file");

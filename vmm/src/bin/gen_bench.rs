@@ -215,6 +215,8 @@ fn main() {
     let bc = Bytecode {
         functions: vec![is_munch, worker, main_fn],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let f = File::create("/tmp/bench_munchausen_10m.bin").expect("create file");
@@ -230,6 +232,8 @@ fn main() {
     let bc_stub = Bytecode {
         functions: vec![stub, worker_stub, main_stub],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let f_stub = File::create("/tmp/bench_munchausen_10m_with_stub.bin").expect("create file");
@@ -243,6 +247,8 @@ fn main() {
     let bc_sieve = Bytecode {
         functions: vec![sieve_kernel, sieve_main],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
     let f_sieve = File::create("sieve_10m.bin").expect("create sieve binary");
     let mut writer_sieve = BufWriter::new(f_sieve);
@@ -253,6 +259,8 @@ fn main() {
     let bc_sieve = Bytecode {
         functions: vec![sieve_kernel, sieve_main],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
     let f_sieve = File::create("sieve_50m.bin").expect("create sieve binary");
     let mut writer_sieve = BufWriter::new(f_sieve);
@@ -263,6 +271,8 @@ fn main() {
     let bc_sieve = Bytecode {
         functions: vec![sieve_kernel, sieve_main],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
     let f_sieve = File::create("sieve_100m.bin").expect("create sieve binary");
     let mut writer_sieve = BufWriter::new(f_sieve);
@@ -275,6 +285,8 @@ fn main() {
     let bc_mandel = Bytecode {
         functions: vec![mandel_render, mandel_main],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
     let f_mandel = File::create("mandelbrot.bin").expect("create mandelbrot binary");
     let mut writer_mandel = BufWriter::new(f_mandel);
@@ -811,6 +823,8 @@ fn test_single_munch() {
     let bc_stub = Bytecode {
         functions: vec![stub, worker_stub, main_stub],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = vmm::vm::IonVM::new(bc_stub).unwrap();
@@ -856,6 +870,8 @@ fn test_mandel_render() {
     let bc = Bytecode {
         functions: vec![mandel_render, main_fn],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = vmm::vm::IonVM::new(bc).unwrap();
@@ -922,6 +938,8 @@ fn test_mandel_high_res() {
     let bc = Bytecode {
         functions: vec![mandel_render, main_fn],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let t0 = std::time::Instant::now();

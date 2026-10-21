@@ -1,13 +1,13 @@
 //! File system functions for the standard library
 
-use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue, RawFfiFunction};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
 pub struct ReadFile;
 
-impl FfiFunction for ReadFile {
+impl RawFfiFunction for ReadFile {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 1 {
             return Err(FfiError::ArgumentCount {
@@ -17,7 +17,7 @@ impl FfiFunction for ReadFile {
         }
         match &args[0] {
             FfiValue::String(path) => match fs::read_to_string(path) {
-                Ok(content) => Ok(FfiValue::String(content)),
+                Ok(content) => Ok(FfiValue::String(content).into()),
                 Err(e) => Err(FfiError::RuntimeError(format!("Failed to read file '{}': {}", path, e))),
             },
             _ => Err(FfiError::ArgumentType {
@@ -40,9 +40,11 @@ impl FfiFunction for ReadFile {
     }
 }
 
+impl FfiFunction for ReadFile {}
+
 pub struct WriteFile;
 
-impl FfiFunction for WriteFile {
+impl RawFfiFunction for WriteFile {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 2 {
             return Err(FfiError::ArgumentCount {
@@ -52,7 +54,7 @@ impl FfiFunction for WriteFile {
         }
         match (&args[0], &args[1]) {
             (FfiValue::String(path), FfiValue::String(content)) => match fs::write(path, content) {
-                Ok(()) => Ok(FfiValue::Number(content.len() as f64)),
+                Ok(()) => Ok(FfiValue::Number(content.len() as f64).into()),
                 Err(e) => Err(FfiError::RuntimeError(format!("Failed to write file '{}': {}", path, e))),
             },
             _ => Err(FfiError::ArgumentType {
@@ -75,9 +77,11 @@ impl FfiFunction for WriteFile {
     }
 }
 
+impl FfiFunction for WriteFile {}
+
 pub struct AppendFile;
 
-impl FfiFunction for AppendFile {
+impl RawFfiFunction for AppendFile {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 2 {
             return Err(FfiError::ArgumentCount {
@@ -89,7 +93,7 @@ impl FfiFunction for AppendFile {
             (FfiValue::String(path), FfiValue::String(content)) => {
                 match fs::OpenOptions::new().create(true).append(true).open(path) {
                     Ok(mut file) => match file.write_all(content.as_bytes()) {
-                        Ok(()) => Ok(FfiValue::Number(content.len() as f64)),
+                        Ok(()) => Ok(FfiValue::Number(content.len() as f64).into()),
                         Err(e) => Err(FfiError::RuntimeError(format!("Failed to append to file '{}': {}", path, e))),
                     },
                     Err(e) => Err(FfiError::RuntimeError(format!("Failed to open file '{}': {}", path, e))),
@@ -115,9 +119,11 @@ impl FfiFunction for AppendFile {
     }
 }
 
+impl FfiFunction for AppendFile {}
+
 pub struct FileExists;
 
-impl FfiFunction for FileExists {
+impl RawFfiFunction for FileExists {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 1 {
             return Err(FfiError::ArgumentCount {
@@ -126,7 +132,7 @@ impl FfiFunction for FileExists {
             });
         }
         match &args[0] {
-            FfiValue::String(path) => Ok(FfiValue::Boolean(Path::new(path).exists())),
+            FfiValue::String(path) => Ok(FfiValue::Boolean(Path::new(path).exists()).into()),
             _ => Err(FfiError::ArgumentType {
                 expected: "String".to_string(),
                 got: args[0].type_name().to_string(),
@@ -147,9 +153,11 @@ impl FfiFunction for FileExists {
     }
 }
 
+impl FfiFunction for FileExists {}
+
 pub struct RemoveFile;
 
-impl FfiFunction for RemoveFile {
+impl RawFfiFunction for RemoveFile {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 1 {
             return Err(FfiError::ArgumentCount {
@@ -159,7 +167,7 @@ impl FfiFunction for RemoveFile {
         }
         match &args[0] {
             FfiValue::String(path) => match fs::remove_file(path) {
-                Ok(()) => Ok(FfiValue::Boolean(true)),
+                Ok(()) => Ok(FfiValue::Boolean(true).into()),
                 Err(e) => Err(FfiError::RuntimeError(format!("Failed to remove file '{}': {}", path, e))),
             },
             _ => Err(FfiError::ArgumentType {
@@ -181,6 +189,8 @@ impl FfiFunction for RemoveFile {
         Some("Delete a file at the given path")
     }
 }
+
+impl FfiFunction for RemoveFile {}
 
 pub fn register_fs_functions(registry: &mut FfiRegistry) {
     registry.register(ReadFile);

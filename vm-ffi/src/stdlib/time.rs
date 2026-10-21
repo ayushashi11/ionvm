@@ -1,11 +1,11 @@
 //! Time functions for the standard library
 
-use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue, RawFfiFunction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct GetTime;
 
-impl FfiFunction for GetTime {
+impl RawFfiFunction for GetTime {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if !args.is_empty() {
             return Err(FfiError::ArgumentCount {
@@ -19,7 +19,7 @@ impl FfiFunction for GetTime {
             .duration_since(UNIX_EPOCH)
             .map_err(|e| FfiError::RuntimeError(format!("Time error: {}", e)))?;
 
-        Ok(FfiValue::Float(since_the_epoch.as_secs_f64()))
+        Ok(FfiValue::Float(since_the_epoch.as_secs_f64()).into())
     }
 
     fn name(&self) -> &str {
@@ -38,6 +38,8 @@ impl FfiFunction for GetTime {
         Some("Get current system time in seconds since Unix epoch")
     }
 }
+
+impl FfiFunction for GetTime {}
 
 pub fn register_time_functions(registry: &mut FfiRegistry) {
     registry.register(GetTime);

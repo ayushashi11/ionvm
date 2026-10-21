@@ -1,6 +1,6 @@
 //! I/O functions for the standard library
 
-use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue, RawFfiFunction};
 use regex::Regex;
 use std::io::{self, Write};
 
@@ -9,7 +9,7 @@ macro_rules! io_function {
     ($name:ident, $arity:expr, $description:expr, |$args:ident| $body:expr) => {
         pub struct $name;
 
-        impl FfiFunction for $name {
+        impl RawFfiFunction for $name {
             fn call(&self, _ctx: &mut dyn crate::FfiContext, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() != $arity {
                     return Err(FfiError::ArgumentCount {
@@ -17,7 +17,8 @@ macro_rules! io_function {
                         got: $args.len(),
                     });
                 }
-                $body
+                let res: Result<FfiValue, FfiError> = $body;
+                res.map(Into::into)
             }
 
             fn name(&self) -> &str {
@@ -36,12 +37,14 @@ macro_rules! io_function {
                 $crate::FfiType::Void
             }
         }
+
+        impl FfiFunction for $name {}
     };
 
     ($name:ident,  $arity:expr, $variadic:ident, $description:expr, |$args:ident| $body:expr) => {
         pub struct $name;
 
-        impl FfiFunction for $name {
+        impl RawFfiFunction for $name {
             fn call(&self, _ctx: &mut dyn crate::FfiContext, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() < $arity {
                     return Err(FfiError::ArgumentCount {
@@ -49,7 +52,8 @@ macro_rules! io_function {
                         got: $args.len(),
                     });
                 }
-                $body
+                let res: Result<FfiValue, FfiError> = $body;
+                res.map(Into::into)
             }
 
             fn name(&self) -> &str {
@@ -71,6 +75,8 @@ macro_rules! io_function {
                 $crate::FfiType::Void
             }
         }
+
+        impl FfiFunction for $name {}
     };
 }
 
@@ -245,6 +251,92 @@ io_function!(Eprint, 1, "Print a value to stderr", |args| {
     Ok(FfiValue::Unit)
 });
 
+pub struct ReadLine;
+
+impl RawFfiFunction for ReadLine {
+    fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
+        if !args.is_empty() {
+            return Err(FfiError::ArgumentCount {
+                expected: 0,
+                got: args.len(),
+            });
+        }
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => Ok(FfiValue::String(String::new()).into()),
+            Ok(_) => Ok(FfiValue::String(line).into()),
+            Err(e) => Err(FfiError::RuntimeError(format!("Failed to read line: {}", e))),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ReadLine"
+    }
+
+    fn arity(&self) -> usize {
+        0
+    }
+
+    fn return_type(&self) -> crate::FfiType {
+        crate::FfiType::String
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Reads a line from standard input")
+    }
+}
+
+impl FfiFunction for ReadLine {}
+
+pub struct ReadStdin;
+
+impl RawFfiFunction for ReadStdin {
+    fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
+        if args.len() != 1 {
+            return Err(FfiError::ArgumentCount {
+                expected: 1,
+                got: args.len(),
+            });
+        }
+        let count = match &args[0] {
+            FfiValue::Integer(i) => (*i).max(0) as usize,
+            FfiValue::Number(n) => (*n).max(0.0) as usize,
+            _ => {
+                return Err(FfiError::ArgumentType {
+                    expected: "Integer".to_string(),
+                    got: args[0].type_name().to_string(),
+                })
+            }
+        };
+
+        use std::io::Read;
+        let mut buf = vec![0u8; count];
+        let mut stdin = io::stdin();
+        match stdin.read_exact(&mut buf) {
+            Ok(()) => Ok(FfiValue::String(String::from_utf8_lossy(&buf).to_string()).into()),
+            Err(e) => Err(FfiError::RuntimeError(format!("Failed to read stdin: {}", e))),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ReadStdin"
+    }
+
+    fn arity(&self) -> usize {
+        1
+    }
+
+    fn return_type(&self) -> crate::FfiType {
+        crate::FfiType::String
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Reads exactly N bytes from standard input as a String")
+    }
+}
+
+impl FfiFunction for ReadStdin {}
+
 /// Register all I/O functions with the registry
 pub fn register_io_functions(registry: &mut FfiRegistry) {
     registry.register(Print);
@@ -252,6 +344,8 @@ pub fn register_io_functions(registry: &mut FfiRegistry) {
     registry.register(PrintF);
     registry.register(Debug);
     registry.register(Eprint);
+    registry.register(ReadLine);
+    registry.register(ReadStdin);
 }
 
 #[cfg(test)]

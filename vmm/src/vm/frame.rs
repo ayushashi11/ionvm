@@ -12,6 +12,7 @@ pub struct Frame {
     pub ret_store: OperandType,
     pub cached_indexed_items: [Option<Vec<Option<Property>>>; 8],
     pub cached_int_arrays: [Option<Vec<i64>>; 8],
+    pub closure_env: Option<Arc<RwLock<Vec<Value>>>>,
 }
 
 impl Frame {
@@ -44,6 +45,7 @@ impl Frame {
             ret_store,
             cached_indexed_items: cached,
             cached_int_arrays: cached_ints,
+            closure_env: None,
         }
     }
 }

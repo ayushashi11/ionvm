@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use vm_ffi::bridge::{FromFfiValue, ToFfiValue};
-use vm_ffi::{FfiContext, FfiError, FfiRegistry, FfiValue};
+use vm_ffi::{FfiContext, FfiError, FfiRegistry, FfiReturn, FfiValue};
 
 use crate::lang::types::{Object, Property, Protection, Value};
 
@@ -119,6 +119,28 @@ impl FfiContext for VmFfiContext {
 
 thread_local! {
     static FFI_REGISTRY: RefCell<FfiRegistry> = RefCell::new(FfiRegistry::with_stdlib());
+    static LOCAL_SYNC_VERSION: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub fn with_ffi_registry<R>(f: impl FnOnce(&mut FfiRegistry) -> R) -> R {
+    FFI_REGISTRY.with(|reg_cell| {
+        let mut reg = reg_cell.borrow_mut();
+        f(&mut *reg)
+    })
+}
+
+fn sync_registered_natives(reg: &mut FfiRegistry) {
+    crate::builtin::native::sync_registered_natives(reg);
+}
+
+fn sync_if_needed(reg_cell: &RefCell<FfiRegistry>) {
+    let global_ver = crate::builtin::native::get_native_version();
+    let local_ver = LOCAL_SYNC_VERSION.get();
+    if local_ver < global_ver {
+        let mut reg = reg_cell.borrow_mut();
+        sync_registered_natives(&mut *reg);
+        LOCAL_SYNC_VERSION.set(global_ver);
+    }
 }
 
 fn snake_to_pascal(s: &str) -> String {
@@ -133,23 +155,76 @@ fn snake_to_pascal(s: &str) -> String {
         .collect()
 }
 
+fn handle_ffi_return(res: FfiReturn) -> Option<Value> {
+    match res {
+        FfiReturn::Value(v) => Value::from_ffi(v).ok(),
+        FfiReturn::Callback { name, args } => {
+            let cb_vm_args: Vec<Value> = args
+                .into_iter()
+                .map(|a| Value::from_ffi(a).unwrap_or(Value::Nil))
+                .collect();
+            crate::builtin::call_native(&name, &cb_vm_args)
+        }
+        FfiReturn::WaitAndCheck {
+            target,
+            args,
+            timeout_ms,
+        } => {
+            let check_vm_args: Vec<Value> = args
+                .into_iter()
+                .map(|a| Value::from_ffi(a).unwrap_or(Value::Nil))
+                .collect();
+            let start = std::time::Instant::now();
+            loop {
+                if let Some(val) = crate::builtin::call_native(&target, &check_vm_args) {
+                    if val != Value::Nil && val != Value::Bool(false) {
+                        return Some(val);
+                    }
+                }
+                if let Some(timeout) = timeout_ms {
+                    if start.elapsed().as_millis() as u64 >= timeout {
+                        return None;
+                    }
+                }
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
 /// Call a registered FFI function by name
 pub fn call_ffi(name: &str, args: &[Value]) -> Option<Value> {
     FFI_REGISTRY.with(|reg_cell| {
+        sync_if_needed(reg_cell);
         let registry = reg_cell.borrow();
         let ffi_args: Vec<FfiValue> = args.iter().map(|v| v.to_ffi()).collect();
         let mut ctx = VmFfiContext;
 
-        // 1. Direct name lookup (e.g. "Sqrt", "ReadFile", "GetTime")
+        // 1. Direct name lookup (e.g. "Sqrt", "ReadFile", "GetTime", "gui.show_message")
         if let Ok(res) = registry.call(&mut ctx, name, ffi_args.clone()) {
-            return Value::from_ffi(res).ok();
+            return handle_ffi_return(res);
         }
 
         // 2. Snake_case to PascalCase lookup (e.g. "sqrt" -> "Sqrt", "read_file" -> "ReadFile")
         let pascal_name = snake_to_pascal(name);
         if pascal_name != name {
-            if let Ok(res) = registry.call(&mut ctx, &pascal_name, ffi_args) {
-                return Value::from_ffi(res).ok();
+            if let Ok(res) = registry.call(&mut ctx, &pascal_name, ffi_args.clone()) {
+                return handle_ffi_return(res);
+            }
+        }
+
+        // 3. Namespace stripped leaf lookup (e.g. "rust_math.square" -> "square")
+        if let Some(leaf) = name.split('.').last() {
+            if leaf != name {
+                if let Ok(res) = registry.call(&mut ctx, leaf, ffi_args.clone()) {
+                    return handle_ffi_return(res);
+                }
+                let pascal_leaf = snake_to_pascal(leaf);
+                if pascal_leaf != leaf {
+                    if let Ok(res) = registry.call(&mut ctx, &pascal_leaf, ffi_args) {
+                        return handle_ffi_return(res);
+                    }
+                }
             }
         }
 
@@ -157,9 +232,33 @@ pub fn call_ffi(name: &str, args: &[Value]) -> Option<Value> {
     })
 }
 
+/// Call a registered FFI function by name and return the raw FfiReturn
+pub fn call_ffi_raw(name: &str, args: &[Value]) -> Result<FfiReturn, FfiError> {
+    FFI_REGISTRY.with(|reg_cell| {
+        sync_if_needed(reg_cell);
+        let registry = reg_cell.borrow();
+        let ffi_args: Vec<FfiValue> = args.iter().map(|v| v.to_ffi()).collect();
+        let mut ctx = VmFfiContext;
+
+        if let Ok(res) = registry.call(&mut ctx, name, ffi_args.clone()) {
+            return Ok(res);
+        }
+
+        let pascal_name = snake_to_pascal(name);
+        if pascal_name != name {
+            if let Ok(res) = registry.call(&mut ctx, &pascal_name, ffi_args) {
+                return Ok(res);
+            }
+        }
+
+        Err(FfiError::FunctionNotFound(name.to_string()))
+    })
+}
+
 /// Check if a function name is registered in the FFI registry
 pub fn is_ffi_function(name: &str) -> bool {
     FFI_REGISTRY.with(|reg_cell| {
+        sync_if_needed(reg_cell);
         let registry = reg_cell.borrow();
         if registry.get_function_info(name).is_some() {
             return true;
@@ -172,6 +271,7 @@ pub fn is_ffi_function(name: &str) -> bool {
 /// Get the declared return type of an FFI function
 pub fn get_ffi_return_type(name: &str) -> Option<vm_ffi::FfiType> {
     FFI_REGISTRY.with(|reg_cell| {
+        sync_if_needed(reg_cell);
         let registry = reg_cell.borrow();
         if let Some(t) = registry.get_return_type(name) {
             return Some(t);

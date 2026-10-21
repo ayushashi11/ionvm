@@ -1,13 +1,13 @@
 //! Math functions for the standard library
 
-use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue, RawFfiFunction};
 
 /// Macro to create math FFI functions with automatic argument checking
 macro_rules! math_function {
     ($name:ident, $arity:expr, $description:expr, |$args:ident| $body:expr) => {
         pub struct $name;
 
-        impl FfiFunction for $name {
+        impl RawFfiFunction for $name {
             fn call(&self, _ctx: &mut dyn crate::FfiContext, $args: Vec<FfiValue>) -> FfiResult {
                 if $args.len() != $arity {
                     return Err(FfiError::ArgumentCount {
@@ -15,7 +15,8 @@ macro_rules! math_function {
                         got: $args.len(),
                     });
                 }
-                $body
+                let res: Result<FfiValue, FfiError> = $body;
+                res.map(Into::into)
             }
 
             fn name(&self) -> &str {
@@ -34,6 +35,8 @@ macro_rules! math_function {
                 Some($description)
             }
         }
+
+        impl FfiFunction for $name {}
     };
 }
 

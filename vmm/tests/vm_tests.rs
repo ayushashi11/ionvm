@@ -5,7 +5,7 @@ use vmm::bytecode::instruction::{Bytecode, Instruction, OperandType};
 use vmm::bytecode::opcode::Opcode;
 use vmm::bytecode::serde::{read_bytecode, write_bytecode};
 use vmm::jit::translator::compile_function_with_ir;
-use vmm::lang::types::{Function, FunctionType, Value};
+use vmm::lang::types::{ArrayPattern, Function, FunctionType, ListSegment, Pattern, Value};
 use vmm::vm::IonVM;
 
 #[test]
@@ -51,6 +51,65 @@ fn test_serde_roundtrip() {
     let bc2 = read_bytecode(&mut reader2).expect("deserialize serialized");
 
     assert_eq!(bc, bc2);
+}
+
+#[test]
+fn test_load_time_object_init_is_registered_at_startup() {
+    use vmm::lang::types::{Object, Protection};
+
+    let mut base = Object::new(None);
+    base.set_property("kind", Value::String("base".to_string()), Protection::Writeable);
+    let base = Arc::new(RwLock::new(base));
+
+    let mut point = Object::new(Some(Arc::clone(&base)));
+    point.set_property("x", Value::Int(42), Protection::Writeable);
+    point.set_property("0", Value::Int(7), Protection::Writeable);
+
+    let bc = Bytecode {
+        functions: vec![Function::new(
+            "main".to_string(),
+            vec![
+                Instruction::new(
+                    Opcode::LoadConst,
+                    vec![OperandType::Property("Point".to_string()), OperandType::Register(0)],
+                ),
+                Instruction::new(
+                    Opcode::GetProp,
+                    vec![
+                        OperandType::Register(0),
+                        OperandType::Property("x".to_string()),
+                        OperandType::Register(1),
+                    ],
+                ),
+                Instruction::new(Opcode::Ret, vec![OperandType::Register(1)]),
+            ],
+            2,
+            0,
+            FunctionType::Regular,
+        )],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![
+            ("Point".to_string(), Arc::new(RwLock::new(point))),
+            ("Base".to_string(), Arc::clone(&base)),
+        ],
+    };
+
+    let original_bc = bc.clone();
+    let mut serialized = Vec::new();
+    write_bytecode(&mut serialized, &bc).expect("serialize load-time objects");
+    let bc = read_bytecode(&mut serialized.as_slice()).expect("deserialize load-time objects");
+    assert_eq!(bc, original_bc);
+    assert_eq!(bc.object_inits[0].0, "Base");
+    let point = &bc.object_inits[1].1;
+    let base = &bc.object_inits[0].1;
+    assert!(Arc::ptr_eq(
+        point.read().unwrap().prototype.as_ref().unwrap(),
+        base,
+    ));
+    let mut vm = IonVM::new(bc).expect("init vm with load-time object prototypes");
+    vm.run().expect("run VM");
+    assert_eq!(vm.entrypoint_return(), Some(Value::Int(42)));
 }
 
 #[test]
@@ -111,6 +170,8 @@ fn test_array_and_simd_vector_execution() {
     let bc = Bytecode {
         functions: vec![main_func],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).expect("init vm");
@@ -167,6 +228,8 @@ fn test_simd_string_execution() {
     let bc = Bytecode {
         functions: vec![main_func],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).expect("init vm");
@@ -225,6 +288,8 @@ fn test_auto_vectorization_optimization_pass() {
     let bc = Bytecode {
         functions: vec![main_func],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
     let mut vm = IonVM::new(bc).expect("init vm");
     let res = vm.run();
@@ -282,6 +347,8 @@ fn test_is_munchausen_single() {
     let bc = Bytecode {
         functions: vec![is_munch, main_fn],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).unwrap();
@@ -348,6 +415,8 @@ fn test_w0() {
     let bc = Bytecode {
         functions: vec![is_munch, worker_fn, main_fn],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).unwrap();
@@ -387,6 +456,8 @@ fn test_loop_to_simd_vectorization() {
     let bc = Bytecode {
         functions: vec![func],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
     let mut vm = IonVM::new(bc).unwrap();
     let res = vm.run();
@@ -468,6 +539,8 @@ fn test_ffi_standard_library_execution() {
     let bc = Bytecode {
         functions: vec![main_func],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).unwrap();
@@ -522,6 +595,8 @@ fn test_bitwise_and_shift_execution() {
     let bc = Bytecode {
         functions: vec![main_func],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).unwrap();
@@ -574,6 +649,8 @@ fn test_bitwise_and_shift_jit() {
     let bc = Bytecode {
         functions: vec![worker_func, main_func],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).unwrap();
@@ -696,6 +773,8 @@ fn test_sieve_bitpacked_jit() {
     let bc = Bytecode {
         functions: vec![sieve_func, main_func],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).unwrap();
@@ -714,7 +793,7 @@ fn test_sieve_bitpacked_jit() {
     let mut result = Value::Nil;
 
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     match result {
         Value::Int(count) => assert_eq!(count, 664579, "Primes up to 10M must be exactly 664,579!"),
@@ -778,6 +857,8 @@ fn test_fused_bit_opcodes_jit() {
     let bc = Bytecode {
         functions: vec![bit_fn, main_fn],
         entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
     };
 
     let mut vm = IonVM::new(bc).unwrap();
@@ -863,7 +944,7 @@ fn test_sieve_fused_bit_opcodes_jit() {
     let mut result = Value::Nil;
 
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
 
     match result {
@@ -1016,4 +1097,787 @@ fn test_cuda_kernel_execution() {
     assert_eq!(host_vec[1023], 1065);
 }
 
+#[test]
+fn test_ffi_in_spawned_processes() {
+    let worker_instrs = vec![
+        // r0 = arg0 (parent pid)
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Argument(0), OperandType::Register(0)]),
+        // r1 = arg1 (input: float 144.0)
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Argument(1), OperandType::Register(1)]),
+        // r2 = Sqrt(r1) -> calls FFI function Sqrt from stdlib in spawned worker process
+        Instruction::new(Opcode::Call, vec![OperandType::Function("Sqrt".to_string()), OperandType::Offset(1), OperandType::Register(1), OperandType::Register(2)]),
+        // send(parent_pid: r0, msg: r2)
+        Instruction::new(Opcode::Send, vec![OperandType::Register(0), OperandType::Register(2)]),
+        // ret r2
+        Instruction::new(Opcode::Ret, vec![OperandType::Register(2)]),
+    ];
+    let worker_fn = Function::new("worker_fn".to_string(), worker_instrs, 10, 2, FunctionType::Regular);
 
+    let num_workers = 8;
+    let mut main_instrs = vec![
+        // r0 = SelfProc
+        Instruction::new(Opcode::LoadConst, vec![OperandType::SelfProc, OperandType::Register(0)]),
+        // r4 = sum (0.0)
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Float(0.0)), OperandType::Register(4)]),
+    ];
+
+    // Spawn num_workers across worker threads
+    for i in 0..num_workers {
+        main_instrs.push(Instruction::new(
+            Opcode::Spawn,
+            vec![
+                OperandType::Function("worker_fn".to_string()),
+                OperandType::Offset(2),
+                OperandType::Register(0),
+                OperandType::Constant(Value::Float(144.0)),
+                OperandType::Register(10 + i),
+            ],
+        ));
+    }
+
+    // Collect results from all spawned processes
+    for _ in 0..num_workers {
+        main_instrs.push(Instruction::new(Opcode::Receive, vec![OperandType::Register(2)]));
+        main_instrs.push(Instruction::new(
+            Opcode::Add,
+            vec![
+                OperandType::Register(4),
+                OperandType::Register(2),
+                OperandType::Register(4),
+            ],
+        ));
+    }
+
+    // Check sum == 96.0 (8 * 12.0)
+    main_instrs.push(Instruction::new(
+        Opcode::Eq,
+        vec![
+            OperandType::Register(4),
+            OperandType::Constant(Value::Float(96.0)),
+            OperandType::Register(5),
+        ],
+    ));
+    // If true, jump over division by zero to Ret
+    main_instrs.push(Instruction::new(
+        Opcode::JumpTrue,
+        vec![OperandType::Register(5), OperandType::Offset(2)],
+    ));
+    // Fail: division by zero
+    main_instrs.push(Instruction::new(
+        Opcode::Div,
+        vec![
+            OperandType::Constant(Value::Int(1)),
+            OperandType::Constant(Value::Int(0)),
+            OperandType::Register(6),
+        ],
+    ));
+    // Success: Ret Nil
+    main_instrs.push(Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Nil)]));
+
+    let main_fn = Function::new("main".to_string(), main_instrs, 30, 0, FunctionType::Regular);
+
+    let bc = Bytecode {
+        functions: vec![main_fn, worker_fn],
+        entry_point: "main".to_string(),
+        native_declarations: Vec::new(),
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bc).expect("init vm");
+    let res = vm.run();
+    assert!(res.is_ok(), "VM execution failed in spawned processes: {:?}", res);
+}
+
+#[test]
+fn test_cpp_gtk_ffi_plugin_execution() {
+    use vmm::bytecode::instruction::NativeDeclaration;
+
+    let main_instrs = vec![
+        // r0 = "Hello from IonVM C++ GTK3 Plugin!"
+        Instruction::new(
+            Opcode::LoadConst,
+            vec![
+                OperandType::Constant(Value::String("Hello from IonVM C++ GTK3 Plugin!".to_string())),
+                OperandType::Register(0),
+            ],
+        ),
+        // r1 = "IonVM GTK Dialog"
+        Instruction::new(
+            Opcode::LoadConst,
+            vec![
+                OperandType::Constant(Value::String("IonVM GTK Dialog".to_string())),
+                OperandType::Register(1),
+            ],
+        ),
+        // r2 = Call("gui.show_message", offset: 2, r0, r1) -> dst: r2
+        Instruction::new(
+            Opcode::Call,
+            vec![
+                OperandType::Function("gui.show_message".to_string()),
+                OperandType::Offset(2),
+                OperandType::Register(0),
+                OperandType::Register(1),
+                OperandType::Register(2),
+            ],
+        ),
+        Instruction::new(Opcode::Ret, vec![OperandType::Register(2)]),
+    ];
+
+    let main_fn = Function::new("main".to_string(), main_instrs, 10, 0, FunctionType::Regular);
+
+    let bc = Bytecode {
+        functions: vec![main_fn],
+        entry_point: "main".to_string(),
+        native_declarations: vec![NativeDeclaration {
+            lib_name: "/big_projs/ionvm/libgui.so".to_string(),
+            namespace: "gui".to_string(),
+        }],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bc).expect("init vm with C++ GTK plugin");
+    let res = vm.run();
+    assert!(res.is_ok(), "VM execution of C++ GTK3 plugin failed: {:?}", res);
+}
+
+#[test]
+fn test_rust_dylib_plugin_execution() {
+    use std::sync::{Arc, RwLock};
+    use vmm::bytecode::instruction::NativeDeclaration;
+
+    let out = Arc::new(RwLock::new(vec![0i64]));
+
+    let main_instrs = vec![
+        Instruction::new(
+            Opcode::LoadConst,
+            vec![
+                OperandType::Constant(Value::IntArray(Arc::clone(&out))),
+                OperandType::Register(2),
+            ],
+        ),
+        Instruction::new(
+            Opcode::LoadConst,
+            vec![
+                OperandType::Constant(Value::Int(9)),
+                OperandType::Register(0),
+            ],
+        ),
+        Instruction::new(
+            Opcode::Call,
+            vec![
+                OperandType::Function("rust_math.square".to_string()),
+                OperandType::Offset(1),
+                OperandType::Register(0),
+                OperandType::Register(1),
+            ],
+        ),
+        Instruction::new(
+            Opcode::IArraySet,
+            vec![
+                OperandType::Register(2),
+                OperandType::Constant(Value::Int(0)),
+                OperandType::Register(1),
+            ],
+        ),
+        Instruction::new(Opcode::Ret, vec![OperandType::Register(1)]),
+    ];
+
+    let main_fn = Function::new("main".to_string(), main_instrs, 10, 0, FunctionType::Regular);
+
+    let bc = Bytecode {
+        functions: vec![main_fn],
+        entry_point: "main".to_string(),
+        native_declarations: vec![NativeDeclaration {
+            lib_name: if std::path::Path::new("/big_projs/ionvm/librust_plugin.so").exists() {
+                "/big_projs/ionvm/librust_plugin.so".to_string()
+            } else {
+                "/tmp/librust_plugin.so".to_string()
+            },
+            namespace: "rust_math".to_string(),
+        }],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bc).expect("init vm with Rust dylib plugin");
+    let res = vm.run();
+    assert!(res.is_ok(), "VM execution of Rust dylib plugin failed: {:?}", res);
+    assert_eq!(out.read().unwrap()[0], 81);
+}
+
+#[test]
+fn test_c_fiber_yield_to_vm_execution() {
+    use std::sync::{Arc, RwLock};
+    use vmm::bytecode::instruction::NativeDeclaration;
+
+    let out = Arc::new(RwLock::new(vec![0i64]));
+
+    let main_instrs = vec![
+        // r2 = out array
+        Instruction::new(
+            Opcode::LoadConst,
+            vec![
+                OperandType::Constant(Value::IntArray(Arc::clone(&out))),
+                OperandType::Register(2),
+            ],
+        ),
+        // r0 = 50
+        Instruction::new(
+            Opcode::LoadConst,
+            vec![
+                OperandType::Constant(Value::Int(50)),
+                OperandType::Register(0),
+            ],
+        ),
+        // r1 = Call("gui.yield_calc", arg: r0)
+        // Inside C: pauses via ion_c_yield("sqrt", 100.0), VM executes sqrt(100.0) -> 10.0,
+        // C resumes and calculates 50 + 10 = 60!
+        Instruction::new(
+            Opcode::Call,
+            vec![
+                OperandType::Function("gui.yield_calc".to_string()),
+                OperandType::Offset(1),
+                OperandType::Register(0),
+                OperandType::Register(1),
+            ],
+        ),
+        // out[0] = r1 (60)
+        Instruction::new(
+            Opcode::IArraySet,
+            vec![
+                OperandType::Register(2),
+                OperandType::Constant(Value::Int(0)),
+                OperandType::Register(1),
+            ],
+        ),
+        Instruction::new(Opcode::Ret, vec![OperandType::Register(1)]),
+    ];
+
+    let main_fn = Function::new("main".to_string(), main_instrs, 10, 0, FunctionType::Regular);
+
+    let bc = Bytecode {
+        functions: vec![main_fn],
+        entry_point: "main".to_string(),
+        native_declarations: vec![NativeDeclaration {
+            lib_name: "/big_projs/ionvm/libgui.so".to_string(),
+            namespace: "gui".to_string(),
+        }],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bc).expect("init vm with C plugin for fiber yield test");
+    let res = vm.run();
+    assert!(res.is_ok(), "VM execution with C fiber yield failed: {:?}", res);
+    assert_eq!(out.read().unwrap()[0], 60);
+}
+
+#[test]
+fn test_ffi_return_callback_and_wait_and_check_execution() {
+    use vm_ffi::{FfiContext, FfiFunction, FfiResult, FfiReturn, FfiValue, RawFfiFunction};
+    use vmm::builtin::ffi::{call_ffi, with_ffi_registry};
+
+    // 1. Function returning FfiReturn::Callback
+    struct TestCallbackFn;
+    impl RawFfiFunction for TestCallbackFn {
+        fn call(&self, _ctx: &mut dyn FfiContext, _args: Vec<FfiValue>) -> FfiResult {
+            Ok(FfiReturn::callback("sqrt", vec![FfiValue::Float(144.0)]))
+        }
+        fn name(&self) -> &str { "test_callback_fn" }
+        fn arity(&self) -> usize { 0 }
+    }
+    impl FfiFunction for TestCallbackFn {}
+
+    // 2. Poll target and function returning FfiReturn::WaitAndCheck
+    static POLL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct TestPollTarget;
+    impl RawFfiFunction for TestPollTarget {
+        fn call(&self, _ctx: &mut dyn FfiContext, _args: Vec<FfiValue>) -> FfiResult {
+            let count = POLL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count >= 3 {
+                Ok(FfiValue::Integer(42).into())
+            } else {
+                Ok(FfiValue::Boolean(false).into())
+            }
+        }
+        fn name(&self) -> &str { "test_poll_target" }
+        fn arity(&self) -> usize { 0 }
+    }
+    impl FfiFunction for TestPollTarget {}
+
+    struct TestWaitCheckFn;
+    impl RawFfiFunction for TestWaitCheckFn {
+        fn call(&self, _ctx: &mut dyn FfiContext, _args: Vec<FfiValue>) -> FfiResult {
+            Ok(FfiReturn::wait_and_check("test_poll_target", vec![], Some(1000)))
+        }
+        fn name(&self) -> &str { "test_wait_check_fn" }
+        fn arity(&self) -> usize { 0 }
+    }
+    impl FfiFunction for TestWaitCheckFn {}
+
+    with_ffi_registry(|reg| {
+        reg.register(TestCallbackFn);
+        reg.register(TestPollTarget);
+        reg.register(TestWaitCheckFn);
+    });
+
+    // Test Callback execution
+    let cb_res = call_ffi("test_callback_fn", &[]).expect("callback result");
+    assert_eq!(cb_res, Value::Float(12.0));
+
+    // Test WaitAndCheck execution
+    let wait_res = call_ffi("test_wait_check_fn", &[]).expect("wait and check result");
+    assert_eq!(wait_res, Value::Int(42));
+    assert!(POLL_COUNTER.load(std::sync::atomic::Ordering::SeqCst) >= 4);
+}
+
+#[test]
+fn test_format_value_and_build_string_execution() {
+    use std::sync::{Arc, RwLock};
+    use vmm::bytecode::instruction::{Bytecode, Instruction, OperandType};
+    use vmm::bytecode::opcode::Opcode;
+    use vmm::lang::types::{Function, FunctionType, Value};
+    use vmm::vm::IonVM;
+
+    let out_arr = Arc::new(RwLock::new(vec![Value::Nil, Value::Nil]));
+
+    // Bytecode function equivalent to f-string:
+    // f"User {name} (#0x{id:x}) scored {score:.2f}%!"
+    //
+    // r0: name ("Alice")
+    // r1: id (255)
+    // r2: score (0.9525)
+    // r3: formatted name ("Alice")
+    // r4: formatted id ("ff")
+    // r5: formatted score ("95.25%")
+    // r6: final built string ("User Alice (#0xff) scored 95.25%!")
+    // r7: RegisterList built string ("Aliceff95.25%")
+    // r8: out_arr
+    let instructions = vec![
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Array(Arc::clone(&out_arr))), OperandType::Register(8)]),
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::String("Alice".to_string())), OperandType::Register(0)]),
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Int(255)), OperandType::Register(1)]),
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Float(0.9525)), OperandType::Register(2)]),
+
+        // Format name with default format
+        Instruction::new(Opcode::FormatValue, vec![OperandType::Register(0), OperandType::Register(3)]),
+
+        // Format id as lowercase hex ("ff")
+        Instruction::new(Opcode::FormatValue, vec![
+            OperandType::Register(1),
+            OperandType::Constant(Value::String("x".to_string())),
+            OperandType::Register(4),
+        ]),
+
+        // Format score as percentage with 2 decimal places ("95.25%")
+        Instruction::new(Opcode::FormatValue, vec![
+            OperandType::Register(2),
+            OperandType::Constant(Value::String(".2%".to_string())),
+            OperandType::Register(5),
+        ]),
+
+        // Build string using multiple operands
+        Instruction::new(Opcode::BuildString, vec![
+            OperandType::Constant(Value::String("User ".to_string())),
+            OperandType::Register(3),
+            OperandType::Constant(Value::String(" (#0x".to_string())),
+            OperandType::Register(4),
+            OperandType::Constant(Value::String(") scored ".to_string())),
+            OperandType::Register(5),
+            OperandType::Constant(Value::String("!".to_string())),
+            OperandType::Register(6),
+        ]),
+
+        // Also test RegisterList build_string
+        Instruction::new(Opcode::BuildString, vec![
+            OperandType::RegisterList(vec![3, 4, 5]),
+            OperandType::Register(7),
+        ]),
+
+        // Store into out_arr
+        Instruction::new(Opcode::ArraySet, vec![
+            OperandType::Register(8),
+            OperandType::Constant(Value::Int(0)),
+            OperandType::Register(6),
+        ]),
+        Instruction::new(Opcode::ArraySet, vec![
+            OperandType::Register(8),
+            OperandType::Constant(Value::Int(1)),
+            OperandType::Register(7),
+        ]),
+
+        Instruction::new(Opcode::Ret, vec![OperandType::Register(6)]),
+    ];
+
+    let func = Function::new("main".to_string(), instructions, 10, 0, FunctionType::Regular);
+    let bytecode = Bytecode {
+        functions: vec![func],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bytecode).unwrap();
+    let res = vm.run();
+    assert!(res.is_ok(), "VM run failed: {:?}", res);
+
+    let results = out_arr.read().unwrap();
+    assert_eq!(
+        results[0],
+        Value::String("User Alice (#0xff) scored 95.25%!".to_string())
+    );
+    assert_eq!(
+        results[1],
+        Value::String("Aliceff95.25%".to_string())
+    );
+}
+
+#[test]
+fn test_format_value_char_specifier() {
+    let out_arr = Arc::new(RwLock::new(vec![Value::Nil; 2]));
+    let instructions = vec![
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Array(Arc::clone(&out_arr))), OperandType::Register(0)]),
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Int(65)), OperandType::Register(1)]),
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::String("c".to_string())), OperandType::Register(2)]),
+        Instruction::format_value(OperandType::Register(1), OperandType::Register(2), OperandType::Register(3)),
+        Instruction::new(Opcode::ArraySet, vec![OperandType::Register(0), OperandType::Constant(Value::Int(0)), OperandType::Register(3)]),
+
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Int(97)), OperandType::Register(4)]),
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::String(">4c".to_string())), OperandType::Register(5)]),
+        Instruction::format_value(OperandType::Register(4), OperandType::Register(5), OperandType::Register(6)),
+        Instruction::new(Opcode::ArraySet, vec![OperandType::Register(0), OperandType::Constant(Value::Int(1)), OperandType::Register(6)]),
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Nil)]),
+    ];
+
+    let func = Function::new("main".to_string(), instructions, 10, 0, FunctionType::Regular);
+    let bytecode = Bytecode {
+        functions: vec![func],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bytecode).unwrap();
+    let res = vm.run();
+    assert!(res.is_ok(), "VM run failed: {:?}", res);
+
+    let results = out_arr.read().unwrap();
+    assert_eq!(results[0], Value::String("A".to_string()));
+    assert_eq!(results[1], Value::String("   a".to_string()));
+}
+
+#[test]
+fn test_match_pattern_array_decomposition_execution() {
+    // Array: [1, 2, 3, 4, 5, 6, 7]
+    // Pattern: [..a | b | ..c] -> a in r2, b in r3, c in r4
+    let list_data = Value::IntArray(Arc::new(RwLock::new(vec![1, 2, 3, 4, 5, 6, 7])));
+    let out_arr = Arc::new(RwLock::new(vec![Value::Nil; 3]));
+
+    let pat = Pattern::Array(ArrayPattern::head_mid_tail(
+        ListSegment::BindList(2),
+        ListSegment::Element(Pattern::Bind(3)),
+        ListSegment::BindList(4),
+    ));
+
+    let instructions = vec![
+        // 0: Load output array into r0
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Array(Arc::clone(&out_arr))), OperandType::Register(0)]),
+        // 1: Load list into r1
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(list_data), OperandType::Register(1)]),
+        // 2: Match r1 against pattern; if matches, jump +2 (to inst 4); if no match, fall through to inst 3
+        Instruction::new(Opcode::Match, vec![OperandType::Register(1), OperandType::Pattern(pat), OperandType::Offset(2)]),
+        // 3: Failure fallthrough: store -1 into out[0] and ret
+        Instruction::new(Opcode::ArraySet, vec![OperandType::Register(0), OperandType::Constant(Value::Int(0)), OperandType::Constant(Value::Int(-1))]),
+        // 4: Success: out[0] = b (r3)
+        Instruction::new(Opcode::ArraySet, vec![OperandType::Register(0), OperandType::Constant(Value::Int(0)), OperandType::Register(3)]),
+        // 5: out[1] = a (r2)
+        Instruction::new(Opcode::ArraySet, vec![OperandType::Register(0), OperandType::Constant(Value::Int(1)), OperandType::Register(2)]),
+        // 6: out[2] = c (r4)
+        Instruction::new(Opcode::ArraySet, vec![OperandType::Register(0), OperandType::Constant(Value::Int(2)), OperandType::Register(4)]),
+        // 7: Ret
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Nil)]),
+    ];
+
+    let func = Function::new("main".to_string(), instructions, 10, 0, FunctionType::Regular);
+    let bytecode = Bytecode {
+        functions: vec![func],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bytecode).unwrap();
+    let res = vm.run();
+    assert!(res.is_ok(), "VM run failed: {:?}", res);
+
+    let results = out_arr.read().unwrap();
+    assert_eq!(results[0], Value::Int(4));
+    if let Value::IntArray(a) = &results[1] {
+        assert_eq!(*a.read().unwrap(), vec![1, 2, 3]);
+    } else {
+        panic!("Expected IntArray for a, got {:?}", results[1]);
+    }
+    if let Value::IntArray(c) = &results[2] {
+        assert_eq!(*c.read().unwrap(), vec![5, 6, 7]);
+    } else {
+        panic!("Expected IntArray for c, got {:?}", results[2]);
+    }
+}
+
+#[test]
+fn test_match_pattern_range_and_literal_execution() {
+    // Array: [5, 42, 7]
+    // Pattern: [..10, b, 7] -> b in r2
+    let list_data = Value::IntArray(Arc::new(RwLock::new(vec![5, 42, 7])));
+    let out_arr = Arc::new(RwLock::new(vec![Value::Nil; 1]));
+
+    let pat = Pattern::Array(ArrayPattern::new(vec![
+        ListSegment::Element(Pattern::IntRange(None, Some(10), false)),
+        ListSegment::Element(Pattern::Bind(2)),
+        ListSegment::Element(Pattern::Literal(Value::Int(7))),
+    ]));
+
+    let instructions = vec![
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(Value::Array(Arc::clone(&out_arr))), OperandType::Register(0)]),
+        Instruction::new(Opcode::LoadConst, vec![OperandType::Constant(list_data), OperandType::Register(1)]),
+        Instruction::new(Opcode::Match, vec![OperandType::Register(1), OperandType::Pattern(pat), OperandType::Offset(2)]),
+        // Fallthrough on fail
+        Instruction::new(Opcode::ArraySet, vec![OperandType::Register(0), OperandType::Constant(Value::Int(0)), OperandType::Constant(Value::Int(-999))]),
+        // Jump target on success
+        Instruction::new(Opcode::ArraySet, vec![OperandType::Register(0), OperandType::Constant(Value::Int(0)), OperandType::Register(2)]),
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Nil)]),
+    ];
+
+    let func = Function::new("main".to_string(), instructions, 10, 0, FunctionType::Regular);
+    let bytecode = Bytecode {
+        functions: vec![func],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bytecode).unwrap();
+    let res = vm.run();
+    assert!(res.is_ok(), "VM run failed: {:?}", res);
+
+    let results = out_arr.read().unwrap();
+    assert_eq!(results[0], Value::Int(42));
+}
+
+#[test]
+fn test_pattern_serde_roundtrip() {
+    let pat = Pattern::Array(ArrayPattern::head_mid_tail(
+        ListSegment::BindList(2),
+        ListSegment::Element(Pattern::IntRange(Some(1), Some(100), true)),
+        ListSegment::BindList(4),
+    ));
+
+    let inst = Instruction::new(Opcode::Match, vec![
+        OperandType::Register(0),
+        OperandType::Pattern(pat.clone()),
+        OperandType::Offset(5),
+    ]);
+
+    let func = Function::new("main".to_string(), vec![inst, Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Nil)])], 5, 0, FunctionType::Regular);
+    let bytecode = Bytecode {
+        functions: vec![func],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut buf = Vec::new();
+    write_bytecode(&mut buf, &bytecode).expect("write bytecode");
+
+    let mut reader = std::io::Cursor::new(buf);
+    let roundtripped = read_bytecode(&mut reader).expect("read bytecode");
+
+    assert_eq!(bytecode.functions.len(), roundtripped.functions.len());
+    assert_eq!(bytecode.functions[0].instructions[0], roundtripped.functions[0].instructions[0]);
+}
+
+#[test]
+fn test_llvm_jit_match_switch() {
+    let match_inst = Instruction::new(Opcode::Match, vec![
+        OperandType::Argument(0),
+        OperandType::Pattern(Pattern::Literal(Value::Int(1))),
+        OperandType::Offset(2),
+        OperandType::Pattern(Pattern::Literal(Value::Int(2))),
+        OperandType::Offset(3),
+        OperandType::Pattern(Pattern::Literal(Value::Int(3))),
+        OperandType::Offset(4),
+    ]);
+
+    let instructions = vec![
+        // 0: match
+        match_inst,
+        // 1: default ret -1
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Int(-1))]),
+        // 2: ret 100 (0 + 2 = 2)
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Int(100))]),
+        // 3: ret 200 (0 + 3 = 3)
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Int(200))]),
+        // 4: ret 300 (0 + 4 = 4)
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Int(300))]),
+    ];
+
+    let func = Function::new("match_switch".to_string(), instructions, 5, 1, FunctionType::Regular);
+    let (jit_fn, ir) = compile_function_with_ir(&func).expect("JIT compile match switch");
+
+    // LLVM compiles and optimizes the match arms
+    assert!(!ir.is_empty());
+
+    let mut registers = vec![Value::Nil; 5];
+    let mut result = Value::Nil;
+
+    // Test case 2 -> 200
+    let args = vec![Value::Int(2)];
+    unsafe {
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(200));
+
+    // Test case 1 -> 100
+    let args = vec![Value::Int(1)];
+    unsafe {
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(100));
+
+    // Test case 3 -> 300
+    let args = vec![Value::Int(3)];
+    unsafe {
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(300));
+
+    // Test default -> -1
+    let args = vec![Value::Int(99)];
+    unsafe {
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(-1));
+}
+
+#[test]
+fn test_llvm_jit_match_ranges() {
+    let match_inst = Instruction::new(Opcode::Match, vec![
+        OperandType::Argument(0),
+        OperandType::Pattern(Pattern::IntRange(Some(5), Some(10), false)),
+        OperandType::Offset(2),
+        OperandType::Pattern(Pattern::IntRange(Some(10), Some(20), true)),
+        OperandType::Offset(3),
+    ]);
+
+    let instructions = vec![
+        // 0: match
+        match_inst,
+        // 1: default ret 3
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Int(3))]),
+        // 2: ret 1 (0 + 2 = 2)
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Int(1))]),
+        // 3: ret 2 (0 + 3 = 3)
+        Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Int(2))]),
+    ];
+
+    let func = Function::new("match_ranges".to_string(), instructions, 5, 1, FunctionType::Regular);
+    let (jit_fn, _ir) = compile_function_with_ir(&func).expect("JIT compile match ranges");
+
+    let mut registers = vec![Value::Nil; 5];
+    let mut result = Value::Nil;
+
+    // 7 is in 5..10 -> ret 1
+    let args = vec![Value::Int(7)];
+    unsafe {
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(1));
+
+    // 20 is in 10..=20 -> ret 2
+    let args = vec![Value::Int(20)];
+    unsafe {
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(2));
+
+    // 10 is in 10..=20 (since 5..10 is exclusive) -> ret 2
+    let args = vec![Value::Int(10)];
+    unsafe {
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(2));
+
+    // 100 is in default -> ret 3
+    let args = vec![Value::Int(100)];
+    unsafe {
+        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(3));
+}
+
+#[test]
+fn test_closure_make_env_and_captured_execution() {
+    let closure_fn = Function::new(
+        "adder_closure".to_string(),
+        vec![
+            // r0 = arg0 + cap(0)
+            Instruction::new(Opcode::Add, vec![
+                OperandType::Argument(0),
+                OperandType::Captured(0),
+                OperandType::Register(0),
+            ]),
+            Instruction::new(Opcode::Ret, vec![OperandType::Register(0)]),
+        ],
+        2,
+        1,
+        FunctionType::Regular,
+    );
+
+    let main_fn = Function::new(
+        "main".to_string(),
+        vec![
+            // r0 = 40 (value to capture)
+            Instruction::new(Opcode::LoadConst, vec![
+                OperandType::Constant(Value::Int(40)),
+                OperandType::Register(0),
+            ]),
+            // r1 = make_env([r0])
+            Instruction::new(Opcode::MakeEnv, vec![
+                OperandType::Register(1),
+                OperandType::RegisterList(vec![0]),
+            ]),
+            // r2 = make_closure("adder_closure", env=r1)
+            Instruction::new(Opcode::MakeClosure, vec![
+                OperandType::Function("adder_closure".to_string()),
+                OperandType::Register(1),
+                OperandType::Register(2),
+            ]),
+            // r4 = 2 (argument to pass)
+            Instruction::new(Opcode::LoadConst, vec![
+                OperandType::Constant(Value::Int(2)),
+                OperandType::Register(4),
+            ]),
+            // r3 = call r2(r4)
+            Instruction::new(Opcode::Call, vec![
+                OperandType::Register(2),
+                OperandType::Offset(1),
+                OperandType::Register(4),
+                OperandType::Register(3),
+            ]),
+            Instruction::new(Opcode::Ret, vec![OperandType::Register(3)]),
+        ],
+        5,
+        0,
+        FunctionType::Regular,
+    );
+
+    let bc = Bytecode {
+        functions: vec![main_fn, closure_fn],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bc).expect("init vm");
+    let res = vm.run();
+    assert!(res.is_ok(), "VM execution failed: {:?}", res);
+    assert_eq!(vm.entrypoint_return(), Some(Value::Int(42)));
+}

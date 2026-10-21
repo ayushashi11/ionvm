@@ -47,7 +47,7 @@ Every instruction consists of an `Opcode` and zero or more operands (`OperandTyp
 | 7 | `jump` | `Jump off` | Unconditional relative jump (`pc += off`). |
 | 8 | `jump_true` | `JumpTrue cond, off` | Jump if `cond` is truthy. |
 | 9 | `jump_false` | `JumpFalse cond, off` | Jump if `cond` is falsy. |
-| 10 | `call` | `Call fn, off, args..., dst` | Calls bytecode function or FFI native routine. |
+| 10 | `call` | `Call fn, off, args..., dst` | Calls bytecode function or FFI native routine (supports direct returns, callbacks, and cooperative polling). |
 | 11 | `ret` | `Ret val` | Returns value to caller frame. |
 | 12 | `eq` | `Eq a, b, dst` | Equality check (`a == b`). |
 | 13 | `lt` | `Lt a, b, dst` | Less-than check (`a < b`). |
@@ -55,7 +55,7 @@ Every instruction consists of an `Opcode` and zero or more operands (`OperandTyp
 | 15 | `le` | `Le a, b, dst` | Less-than-or-equal check (`a <= b`). |
 | 16 | `ge` | `Ge a, b, dst` | Greater-than-or-equal check (`a >= b`). |
 | 17 | `neq` | `Neq a, b, dst` | Inequality check (`a != b`). |
-| 18 | `match` | `Match val, [(pat, off)...]`| Pattern matching over value. |
+| 18 | `match` | `Match val, [(pat, off)...], [default_off]` | Pattern matching engine: evaluates patterns, commits variable register bindings, and branches. Supports literals, wildcards, ranges (`IntRange`/`FloatRange`), and array decomposition (`Array`/`IntArray`/`FloatArray` with head, middle, tail, and `bindlist` slices). |
 | 19 | `and_` / `and` | `And a, b, dst` | Logical/bitwise AND. |
 | 20 | `or_` / `or` | `Or a, b, dst` | Logical/bitwise OR. |
 | 21 | `xor` | `Xor a, b, dst` | Logical/bitwise XOR. |
@@ -104,7 +104,7 @@ Fused comparison and branch instructions eliminate intermediate boolean register
 | 55 | `F_gt_jmp_RR` | `FGtJmpRR r1, r2, off` | Jump if float `r1 > r2`. |
 | 56 | `F_lt_jmp_RR` | `FLtJmpRR r1, r2, off` | Jump if float `r1 < r2`. |
 
-### 3.4 SIMD & String Operations (`57..62, 86..88`)
+### 3.4 SIMD, String & Formatting Operations (`57..62, 86..88, 128..129`)
 | Opcode | Mnemonic | Format | Description |
 |---|---|---|---|
 | 57 | `S_concat_RRR` | `SConcatRRR s1, s2, dst` | Concatenates two strings into `dst`. |
@@ -116,6 +116,8 @@ Fused comparison and branch instructions eliminate intermediate boolean register
 | 86 | `S_upper_RR` | `SUpperRR str, dst` | SIMD ASCII uppercase transformation. |
 | 87 | `S_lower_RR` | `SLowerRR str, dst` | SIMD ASCII lowercase transformation. |
 | 88 | `S_count_byte_RRR` | `SCountByteRRR str, byte, dst` | Fast SIMD byte occurrence counting. |
+| 128 | `format_value` | `FormatValue val, [spec,] dst` | Formats a value according to a standard format specifier (`.2f`, `x`, `X`, `b`, `o`, `d`, `05d`, `>10`, `<10`, `^10`, `,`, `_`, `+`, `.1%`) into a string. |
+| 129 | `build_string` | `BuildString parts..., dst` | Single-pass $N$-ary string builder. Pre-calculates combined length, allocates once, and concatenates without intermediate copies. Accepts multiple operands or `RegisterList`. |
 
 ### 3.5 Enum & Tagged Pattern Matching (`63..69`)
 | Opcode | Mnemonic | Format | Description |
@@ -178,6 +180,12 @@ Hardware-accelerated vector instructions operating over 256-bit and 512-bit vect
 | 90 | `call_jit` | `CallJit fn_idx, args...` | Transfers execution directly to LLVM JIT native function pointer. |
 | 91 | `V_munch_range` | `VMunchRange start, end, dst` | AVX-512 accelerated vectorized range computation. |
 
+### 3.9 String Interpolation & Formatting (`128..129`)
+| Opcode | Mnemonic | Format | Description |
+|---|---|---|---|
+| 128 | `format_value` | `FormatValue val, spec, dst` | Formats a `Value` with specifier string `[[fill]align][sign][#][0][width][,\|_][.prec][type]`. Supported types: `c` (integer as unicode char), `d` (decimal), `x`/`X` (hex), `b` (binary), `o` (octal), `f` (fixed-point float), `e`/`E` (scientific), `%` (percentage). |
+| 129 | `build_string` | `BuildString pieces..., dst` | Concatenates variable operands (`Constant`, `Register`, `RegisterList`) into a single string. |
+
 ---
 
 ## 4. Binary Codec (`vmm/src/bytecode/serde.rs`)
@@ -210,3 +218,18 @@ The bytecode file format is self-describing and supports forward/backward compat
 - `Argument`: `[u8 tag: "argument"] [u64: arg index]`
 - `Offset`: `[u8 tag: "offset"] [i64: jump offset]`
 - `JumpTable`: `[u8 tag: "jump_table"] [u64: case count] [(i64 tag, i64 offset)...]`
+- `Pattern`: `[u8 tag: "pattern"] [Serialized Pattern]`
+
+### 4.3 Pattern Serialization Formats
+- `wildcard`: `[tag: "wildcard"]`
+- `literal`: `[tag: "literal"] [Serialized Value]`
+- `bind`: `[tag: "bind"] [u64: reg index]`
+- `int_range`: `[tag: "int_range"] [bool has_start, opt i64] [bool has_end, opt i64] [bool inclusive]`
+- `float_range`: `[tag: "float_range"] [bool has_start, opt f64] [bool has_end, opt f64] [bool inclusive]`
+- `array_pat` / `int_array_pat` / `float_array_pat`:
+  `[tag] [u64: segment count] [For each segment: ListSegment]`
+  - Segment `elem`: `[tag: "elem"] [Pattern]`
+  - Segment `elems`: `[tag: "elems"] [u64: count] [Pattern...]`
+  - Segment `bind_list`: `[tag: "bind_list"] [u64: reg index]`
+  - Segment `wildcard_list`: `[tag: "wildcard_list"]`
+

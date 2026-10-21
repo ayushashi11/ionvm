@@ -10,6 +10,7 @@ use std::sync::Mutex;
 
 use crate::bytecode::instruction::OperandType;
 use crate::bytecode::opcode::Opcode;
+use crate::lang::matcher::{ListSegment, Pattern};
 use crate::lang::types::{Function, NativeJitFn, Value};
 
 struct RawJitRoot(*mut Context, *mut ExecutionEngine<'static>);
@@ -67,6 +68,50 @@ pub unsafe extern "C" fn vm_get_obj_prop_int(obj_val_ptr: *const Value, idx: i64
                         }
                     }
                 }
+            }
+        }
+        _ => {}
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_copy_value(dst: *mut Value, src: *const Value) {
+    if dst.is_null() || src.is_null() {
+        return;
+    }
+    unsafe {
+        *dst = (*src).clone();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_get_enum_tag(val_ptr: *const Value) -> i64 {
+    if val_ptr.is_null() {
+        return -1;
+    }
+    match unsafe { &*val_ptr } {
+        Value::Object(obj) => {
+            if let Ok(borrowed) = obj.read() {
+                if let Some(Value::Int(tag)) = borrowed.get_property("@tag") {
+                    return tag;
+                }
+            }
+        }
+        _ => {}
+    }
+    -1
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_get_intarray_len(val_ptr: *const Value) -> i64 {
+    if val_ptr.is_null() {
+        return 0;
+    }
+    match unsafe { &*val_ptr } {
+        Value::IntArray(arr) => {
+            if let Ok(borrowed) = arr.read() {
+                return borrowed.len() as i64;
             }
         }
         _ => {}
@@ -222,9 +267,13 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     let _i1_type = context.bool_type();
     let void_type = context.void_type();
 
-    let fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+    let fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
     let fn_name = format!("jit_{}", func.name);
     let llvm_fn = module.add_function(&fn_name, fn_type, None);
+
+    let copy_value_fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+    let copy_value_fn = module.add_function("vm_copy_value", copy_value_fn_type, None);
+    ee.add_global_mapping(&copy_value_fn, vm_copy_value as *const () as usize);
 
     let helper_fn_type = i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
     let helper_fn = module.add_function("vm_get_obj_prop_int", helper_fn_type, None);
@@ -254,6 +303,14 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     let arr_set_flt_fn = module.add_function("vm_array_set_float", arr_set_flt_fn_type, None);
     ee.add_global_mapping(&arr_set_flt_fn, vm_array_set_float as *const () as usize);
 
+    let get_enum_tag_fn_type = i64_type.fn_type(&[ptr_type.into()], false);
+    let get_enum_tag_fn = module.add_function("vm_get_enum_tag", get_enum_tag_fn_type, None);
+    ee.add_global_mapping(&get_enum_tag_fn, vm_get_enum_tag as *const () as usize);
+
+    let get_intarray_len_fn_type = i64_type.fn_type(&[ptr_type.into()], false);
+    let get_intarray_len_fn = module.add_function("vm_get_intarray_len", get_intarray_len_fn_type, None);
+    ee.add_global_mapping(&get_intarray_len_fn, vm_get_intarray_len as *const () as usize);
+
     let builder = context.create_builder();
     let entry_bb = context.append_basic_block(llvm_fn, "entry");
 
@@ -265,7 +322,8 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
 
     let regs_param = llvm_fn.get_nth_param(0)?.into_pointer_value();
     let args_param = llvm_fn.get_nth_param(1)?.into_pointer_value();
-    let out_res_param = llvm_fn.get_nth_param(2)?.into_pointer_value();
+    let env_param = llvm_fn.get_nth_param(2)?.into_pointer_value();
+    let out_res_param = llvm_fn.get_nth_param(3)?.into_pointer_value();
 
     let val_size = std::mem::size_of::<Value>();
 
@@ -273,6 +331,48 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
         let offset = (reg_idx * val_size) as u64;
         let offset_val = i64_type.const_int(offset, false);
         unsafe { builder.build_gep(i8_type, regs_param, &[offset_val], "reg_ptr") }
+    };
+
+    let get_cap_ptr = |builder: &inkwell::builder::Builder<'static>, cap_idx: usize| -> Result<PointerValue<'static>, inkwell::builder::BuilderError> {
+        let offset = (cap_idx * val_size) as u64;
+        let offset_val = i64_type.const_int(offset, false);
+        unsafe { builder.build_gep(i8_type, env_param, &[offset_val], "cap_ptr") }
+    };
+
+    let get_cap_int = |builder: &inkwell::builder::Builder<'static>, cap_idx: usize| -> Result<IntValue<'static>, inkwell::builder::BuilderError> {
+        let cap_ptr = get_cap_ptr(builder, cap_idx)?;
+        let int_offset = i64_type.const_int(8, false);
+        let val_ptr = unsafe { builder.build_gep(i8_type, cap_ptr, &[int_offset], "val_ptr") }?;
+        let loaded = builder.build_load(i64_type, val_ptr, "cap_int")?;
+        Ok(loaded.into_int_value())
+    };
+
+    let set_cap_int = |builder: &inkwell::builder::Builder<'static>, cap_idx: usize, val: IntValue<'static>| -> Result<(), inkwell::builder::BuilderError> {
+        let cap_ptr = get_cap_ptr(builder, cap_idx)?;
+        let tag = i8_type.const_int(0, false);
+        builder.build_store(cap_ptr, tag)?;
+        let int_offset = i64_type.const_int(8, false);
+        let val_ptr = unsafe { builder.build_gep(i8_type, cap_ptr, &[int_offset], "val_ptr") }?;
+        builder.build_store(val_ptr, val)?;
+        Ok(())
+    };
+
+    let get_cap_float = |builder: &inkwell::builder::Builder<'static>, cap_idx: usize| -> Result<FloatValue<'static>, inkwell::builder::BuilderError> {
+        let cap_ptr = get_cap_ptr(builder, cap_idx)?;
+        let flt_offset = i64_type.const_int(8, false);
+        let val_ptr = unsafe { builder.build_gep(i8_type, cap_ptr, &[flt_offset], "val_ptr") }?;
+        let loaded = builder.build_load(f64_type, val_ptr, "cap_float")?;
+        Ok(loaded.into_float_value())
+    };
+
+    let set_cap_float = |builder: &inkwell::builder::Builder<'static>, cap_idx: usize, val: FloatValue<'static>| -> Result<(), inkwell::builder::BuilderError> {
+        let cap_ptr = get_cap_ptr(builder, cap_idx)?;
+        let tag = i8_type.const_int(1, false);
+        builder.build_store(cap_ptr, tag)?;
+        let flt_offset = i64_type.const_int(8, false);
+        let val_ptr = unsafe { builder.build_gep(i8_type, cap_ptr, &[flt_offset], "val_ptr") }?;
+        builder.build_store(val_ptr, val)?;
+        Ok(())
     };
 
     let get_reg_int = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize| -> Result<IntValue<'static>, inkwell::builder::BuilderError> {
@@ -340,6 +440,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
         match op {
             OperandType::Register(r) => get_reg_int(builder, *r),
             OperandType::Argument(a) => get_arg_int(builder, *a),
+            OperandType::Captured(c) => get_cap_int(builder, *c),
             OperandType::Constant(Value::Int(c)) => Ok(i64_type.const_int(*c as u64, true)),
             OperandType::Constant(Value::Float(c)) => Ok(i64_type.const_int(*c as i64 as u64, true)),
             OperandType::Constant(Value::Bool(b)) => Ok(i64_type.const_int(if *b { 1 } else { 0 }, false)),
@@ -359,11 +460,21 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
         match op {
             OperandType::Register(r) => get_reg_float(builder, *r),
             OperandType::Argument(a) => get_arg_float(builder, *a),
+            OperandType::Captured(c) => get_cap_float(builder, *c),
             OperandType::Constant(Value::Float(c)) => Ok(f64_type.const_float(*c)),
             OperandType::Constant(Value::Int(c)) => Ok(f64_type.const_float(*c as f64)),
             _ => Ok(f64_type.const_float(0.0)),
         }
     };
+
+    let mut reg_to_arg = std::collections::HashMap::new();
+    for inst in &func.instructions {
+        if inst.opcode == Opcode::LoadConst && inst.operands.len() >= 2 {
+            if let (OperandType::Argument(a), OperandType::Register(r)) = (&inst.operands[0], &inst.operands[1]) {
+                reg_to_arg.insert(*r, *a);
+            }
+        }
+    }
 
     let mut int_array_args = std::collections::HashSet::new();
     let mut float_array_args = std::collections::HashSet::new();
@@ -374,19 +485,33 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
             | Opcode::IBitGet
             | Opcode::IBitSet
             | Opcode::IBitSet1
-            | Opcode::IBitSet0 => {
-                if let Some(OperandType::Argument(a)) = inst.operands.first() {
-                    int_array_args.insert(*a);
+            | Opcode::IBitSet0
+            | Opcode::ArrayGet
+            | Opcode::AGetIndexAR
+            | Opcode::GetIndex => {
+                if let Some(op) = inst.operands.first() {
+                    match op {
+                        OperandType::Argument(a) => { int_array_args.insert(*a); }
+                        OperandType::Register(r) => {
+                            if let Some(&a) = reg_to_arg.get(r) {
+                                int_array_args.insert(a);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             Opcode::FArrayGet | Opcode::FArraySet => {
-                if let Some(OperandType::Argument(a)) = inst.operands.first() {
-                    float_array_args.insert(*a);
-                }
-            }
-            Opcode::ArrayGet | Opcode::AGetIndexAR => {
-                if let Some(OperandType::Argument(a)) = inst.operands.first() {
-                    int_array_args.insert(*a);
+                if let Some(op) = inst.operands.first() {
+                    match op {
+                        OperandType::Argument(a) => { float_array_args.insert(*a); }
+                        OperandType::Register(r) => {
+                            if let Some(&a) = reg_to_arg.get(r) {
+                                float_array_args.insert(a);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -445,7 +570,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::ISubRRR | Opcode::Sub => {
+            Opcode::ISubRRR | Opcode::ISubRCR | Opcode::ISubCRR | Opcode::Sub => {
                 let l = resolve_int(&builder, &ops[0]).ok()?;
                 let r = resolve_int(&builder, &ops[1]).ok()?;
                 let diff = builder.build_int_sub(l, r, "sub_tmp").ok()?;
@@ -458,7 +583,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::IMulRRR | Opcode::Mul => {
+            Opcode::IMulRRR | Opcode::IMulRCR | Opcode::Mul => {
                 let l = resolve_int(&builder, &ops[0]).ok()?;
                 let r = resolve_int(&builder, &ops[1]).ok()?;
                 let prod = builder.build_int_mul(l, r, "mul_tmp").ok()?;
@@ -471,7 +596,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::IDivRCR | Opcode::Div => {
+            Opcode::IDivRCR | Opcode::IDivCRR | Opcode::Div => {
                 let l = resolve_int(&builder, &ops[0]).ok()?;
                 let r = resolve_int(&builder, &ops[1]).ok()?;
                 let div = builder.build_int_signed_div(l, r, "div_tmp").ok()?;
@@ -484,7 +609,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::IRemRCR | Opcode::Rem => {
+            Opcode::IRemRCR | Opcode::IRemCRR | Opcode::Rem => {
                 let l = resolve_int(&builder, &ops[0]).ok()?;
                 let r = resolve_int(&builder, &ops[1]).ok()?;
                 let rem = builder.build_int_signed_rem(l, r, "rem_tmp").ok()?;
@@ -620,6 +745,32 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                             set_reg_int(&builder, dst, val).ok()?;
                         }
                     }
+                } else if let OperandType::Captured(cap_idx) = ops[1] {
+                    match &ops[0] {
+                        OperandType::Register(src) => {
+                            let src_ptr = get_reg_ptr(&builder, *src).ok()?;
+                            let src_tag = builder.build_load(i8_type, src_ptr, "src_tag").ok()?;
+                            let cap_ptr = get_cap_ptr(&builder, cap_idx).ok()?;
+                            builder.build_store(cap_ptr, src_tag).ok()?;
+                            let val_offset = i64_type.const_int(8, false);
+                            let src_val_ptr = unsafe { builder.build_gep(i8_type, src_ptr, &[val_offset], "src_val_ptr") }.ok()?;
+                            let cap_val_ptr = unsafe { builder.build_gep(i8_type, cap_ptr, &[val_offset], "cap_val_ptr") }.ok()?;
+                            let val = builder.build_load(i64_type, src_val_ptr, "val").ok()?;
+                            builder.build_store(cap_val_ptr, val).ok()?;
+                        }
+                        OperandType::Constant(Value::Int(c)) => {
+                            let i_val = i64_type.const_int(*c as u64, true);
+                            set_cap_int(&builder, cap_idx, i_val).ok()?;
+                        }
+                        OperandType::Constant(Value::Float(f)) => {
+                            let f_val = f64_type.const_float(*f);
+                            set_cap_float(&builder, cap_idx, f_val).ok()?;
+                        }
+                        _ => {
+                            let val = resolve_int(&builder, &ops[0]).ok()?;
+                            set_cap_int(&builder, cap_idx, val).ok()?;
+                        }
+                    }
                 }
                 if i + 1 < inst_count {
                     let _ = builder.build_unconditional_branch(bbs[i + 1]);
@@ -627,7 +778,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::Eq | Opcode::IEqRRR => {
+            Opcode::Eq | Opcode::IEqRRR | Opcode::IEqRCR => {
                 let l = resolve_int(&builder, &ops[0]).ok()?;
                 let r = resolve_int(&builder, &ops[1]).ok()?;
                 let cmp = builder.build_int_compare(IntPredicate::EQ, l, r, "cmp_eq").ok()?;
@@ -640,7 +791,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::Lt | Opcode::ILtRRR => {
+            Opcode::Lt | Opcode::ILtRRR | Opcode::ILtRCR | Opcode::ILtCRR => {
                 let l = resolve_int(&builder, &ops[0]).ok()?;
                 let r = resolve_int(&builder, &ops[1]).ok()?;
                 let cmp = builder.build_int_compare(IntPredicate::SLT, l, r, "cmp_lt").ok()?;
@@ -653,7 +804,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::Gt | Opcode::IGtRRR | Opcode::IGtRCR => {
+            Opcode::Gt | Opcode::IGtRRR | Opcode::IGtRCR | Opcode::IGtCRR => {
                 let l = resolve_int(&builder, &ops[0]).ok()?;
                 let r = resolve_int(&builder, &ops[1]).ok()?;
                 let cmp = builder.build_int_compare(IntPredicate::SGT, l, r, "cmp_gt").ok()?;
@@ -753,7 +904,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                 let next_bb = if i + 1 < inst_count { bbs[i + 1] } else { target_bb };
                 let _ = builder.build_conditional_branch(cmp, target_bb, next_bb);
             }
-            Opcode::FAddRRR => {
+            Opcode::FAddRRR | Opcode::FAddRCR => {
                 let l = resolve_float(&builder, &ops[0]).ok()?;
                 let r = resolve_float(&builder, &ops[1]).ok()?;
                 let res = builder.build_float_add(l, r, "fadd").ok()?;
@@ -766,7 +917,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::FSubRRR => {
+            Opcode::FSubRRR | Opcode::FSubRCR | Opcode::FSubCRR => {
                 let l = resolve_float(&builder, &ops[0]).ok()?;
                 let r = resolve_float(&builder, &ops[1]).ok()?;
                 let res = builder.build_float_sub(l, r, "fsub").ok()?;
@@ -779,7 +930,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::FMulRRR => {
+            Opcode::FMulRRR | Opcode::FMulRCR => {
                 let l = resolve_float(&builder, &ops[0]).ok()?;
                 let r = resolve_float(&builder, &ops[1]).ok()?;
                 let res = builder.build_float_mul(l, r, "fmul").ok()?;
@@ -792,7 +943,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::FDivRRR => {
+            Opcode::FDivRRR | Opcode::FDivRCR | Opcode::FDivCRR => {
                 let l = resolve_float(&builder, &ops[0]).ok()?;
                 let r = resolve_float(&builder, &ops[1]).ok()?;
                 let res = builder.build_float_div(l, r, "fdiv").ok()?;
@@ -805,7 +956,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::FEqRRR => {
+            Opcode::FEqRRR | Opcode::FEqRCR => {
                 let l = resolve_float(&builder, &ops[0]).ok()?;
                 let r = resolve_float(&builder, &ops[1]).ok()?;
                 let cmp = builder.build_float_compare(FloatPredicate::OEQ, l, r, "f_eq_tmp").ok()?;
@@ -818,7 +969,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::FLtRRR => {
+            Opcode::FLtRRR | Opcode::FLtRCR | Opcode::FLtCRR => {
                 let l = resolve_float(&builder, &ops[0]).ok()?;
                 let r = resolve_float(&builder, &ops[1]).ok()?;
                 let cmp = builder.build_float_compare(FloatPredicate::OLT, l, r, "f_lt_tmp").ok()?;
@@ -831,7 +982,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let _ = builder.build_return(None);
                 }
             }
-            Opcode::FGtRRR => {
+            Opcode::FGtRRR | Opcode::FGtRCR | Opcode::FGtCRR => {
                 let l = resolve_float(&builder, &ops[0]).ok()?;
                 let r = resolve_float(&builder, &ops[1]).ok()?;
                 let cmp = builder.build_float_compare(FloatPredicate::OGT, l, r, "f_gt_tmp").ok()?;
@@ -872,29 +1023,31 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
             }
             Opcode::IArrayGet => {
                 let idx_val = resolve_int(&builder, &ops[1]).ok()?;
-                match ops[0] {
-                    OperandType::Argument(a) if arg_int_ptrs.contains_key(&a) => {
-                        let data_ptr = arg_int_ptrs[&a];
-                        let elem_ptr = unsafe { builder.build_gep(i64_type, data_ptr, &[idx_val], "elem_ptr") }.ok()?;
-                        let direct_val = builder.build_load(i64_type, elem_ptr, "direct_val").ok()?.into_int_value();
-                        if let OperandType::Register(dst) = ops[2] {
-                            set_reg_int(&builder, dst, direct_val).ok()?;
-                        }
+                let arg_idx = match ops[0] {
+                    OperandType::Argument(a) => Some(a),
+                    OperandType::Register(r) => reg_to_arg.get(&r).copied(),
+                    _ => None,
+                };
+                if let Some(a) = arg_idx.filter(|a| arg_int_ptrs.contains_key(a)) {
+                    let data_ptr = arg_int_ptrs[&a];
+                    let elem_ptr = unsafe { builder.build_gep(i64_type, data_ptr, &[idx_val], "elem_ptr") }.ok()?;
+                    let direct_val = builder.build_load(i64_type, elem_ptr, "direct_val").ok()?.into_int_value();
+                    if let OperandType::Register(dst) = ops[2] {
+                        set_reg_int(&builder, dst, direct_val).ok()?;
                     }
-                    _ => {
-                        let arr_ptr = match ops[0] {
-                            OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
-                            OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
-                            _ => get_arg_ptr(&builder, 0).ok()?,
-                        };
-                        let call_res = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), idx_val.into()], "arr_get_call").ok()?;
-                        let res_val = match call_res.try_as_basic_value() {
-                            inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
-                            _ => return None,
-                        };
-                        if let OperandType::Register(dst) = ops[2] {
-                            set_reg_int(&builder, dst, res_val).ok()?;
-                        }
+                } else {
+                    let arr_ptr = match ops[0] {
+                        OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                        OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                        _ => get_arg_ptr(&builder, 0).ok()?,
+                    };
+                    let call_res = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), idx_val.into()], "arr_get_call").ok()?;
+                    let res_val = match call_res.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                        _ => return None,
+                    };
+                    if let OperandType::Register(dst) = ops[2] {
+                        set_reg_int(&builder, dst, res_val).ok()?;
                     }
                 }
                 if i + 1 < inst_count {
@@ -1207,19 +1360,33 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                 }
             }
             Opcode::GetIndex => {
-                let arg_idx = match ops[0] {
-                    OperandType::Argument(a) => a,
-                    _ => 0,
-                };
-                let obj_ptr = get_arg_ptr(&builder, arg_idx).ok()?;
                 let idx_val = resolve_int(&builder, &ops[1]).ok()?;
-                let call_res = builder.build_call(helper_fn, &[obj_ptr.into(), idx_val.into()], "get_prop_call").ok()?;
-                let res_val = match call_res.try_as_basic_value() {
-                    inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
-                    _ => return None,
+                let arg_idx = match ops[0] {
+                    OperandType::Argument(a) => Some(a),
+                    OperandType::Register(r) => reg_to_arg.get(&r).copied(),
+                    _ => None,
                 };
-                if let OperandType::Register(dst) = ops[2] {
-                    set_reg_int(&builder, dst, res_val).ok()?;
+                if let Some(a) = arg_idx.filter(|a| arg_int_ptrs.contains_key(a)) {
+                    let data_ptr = arg_int_ptrs[&a];
+                    let elem_ptr = unsafe { builder.build_gep(i64_type, data_ptr, &[idx_val], "elem_ptr") }.ok()?;
+                    let direct_val = builder.build_load(i64_type, elem_ptr, "direct_val").ok()?.into_int_value();
+                    if let OperandType::Register(dst) = ops[2] {
+                        set_reg_int(&builder, dst, direct_val).ok()?;
+                    }
+                } else {
+                    let obj_ptr = match ops[0] {
+                        OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                        OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                        _ => get_arg_ptr(&builder, 0).ok()?,
+                    };
+                    let call_res = builder.build_call(helper_fn, &[obj_ptr.into(), idx_val.into()], "get_prop_call").ok()?;
+                    let res_val = match call_res.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                        _ => return None,
+                    };
+                    if let OperandType::Register(dst) = ops[2] {
+                        set_reg_int(&builder, dst, res_val).ok()?;
+                    }
                 }
                 if i + 1 < inst_count {
                     let _ = builder.build_unconditional_branch(bbs[i + 1]);
@@ -1230,6 +1397,16 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
             Opcode::Ret => {
                 if !ops.is_empty() {
                     match &ops[0] {
+                        OperandType::Constant(value @ Value::String(_)) => {
+                            let source_ptr = i64_type
+                                .const_int(value as *const Value as u64, false)
+                                .const_to_pointer(ptr_type);
+                            let _ = builder.build_call(
+                                copy_value_fn,
+                                &[out_res_param.into(), source_ptr.into()],
+                                "copy_string_return",
+                            );
+                        }
                         OperandType::Constant(Value::Bool(b)) => {
                             let tag = i8_type.const_int(2, false);
                             let _ = builder.build_store(out_res_param, tag);
@@ -1277,10 +1454,420 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                                 }
                             }
                         }
+                        OperandType::Captured(c) => {
+                            if let Ok(cap_ptr) = get_cap_ptr(&builder, *c) {
+                                if let Ok(tag_val) = builder.build_load(i8_type, cap_ptr, "ret_tag") {
+                                    let _ = builder.build_store(out_res_param, tag_val);
+                                }
+                                let payload_offset = i64_type.const_int(8, false);
+                                if let (Ok(cap_payload_ptr), Ok(out_payload_ptr)) = unsafe {
+                                    (builder.build_gep(i8_type, cap_ptr, &[payload_offset], "cap_payload_ptr"),
+                                     builder.build_gep(i8_type, out_res_param, &[payload_offset], "out_payload_ptr"))
+                                } {
+                                    if let Ok(payload_val) = builder.build_load(i64_type, cap_payload_ptr, "ret_payload") {
+                                        let _ = builder.build_store(out_payload_ptr, payload_val);
+                                    }
+                                }
+                            }
+                        }
+                        OperandType::Argument(a) => {
+                            if let Ok(arg_ptr) = get_arg_ptr(&builder, *a) {
+                                if let Ok(tag_val) = builder.build_load(i8_type, arg_ptr, "ret_tag") {
+                                    let _ = builder.build_store(out_res_param, tag_val);
+                                }
+                                let payload_offset = i64_type.const_int(8, false);
+                                if let (Ok(arg_payload_ptr), Ok(out_payload_ptr)) = unsafe {
+                                    (builder.build_gep(i8_type, arg_ptr, &[payload_offset], "arg_payload_ptr"),
+                                     builder.build_gep(i8_type, out_res_param, &[payload_offset], "out_payload_ptr"))
+                                } {
+                                    if let Ok(payload_val) = builder.build_load(i64_type, arg_payload_ptr, "ret_payload") {
+                                        let _ = builder.build_store(out_payload_ptr, payload_val);
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
                 let _ = builder.build_return(None);
+            }
+            Opcode::Nop => {
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                }
+            }
+            Opcode::ETagJmpRC => {
+                let obj_ptr = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => get_arg_ptr(&builder, 0).ok()?,
+                };
+                let expected_tag = match ops[1] {
+                    OperandType::Constant(Value::Int(tag)) => tag,
+                    _ => -1,
+                };
+                let off = match ops[2] {
+                    OperandType::Offset(o) => o,
+                    _ => 1,
+                };
+                let target_idx = (i as i64 + off) as usize;
+                let target_bb = *bbs.get(target_idx)?;
+                let next_bb = if i + 1 < inst_count { bbs[i + 1] } else { target_bb };
+
+                let call_res = builder.build_call(get_enum_tag_fn, &[obj_ptr.into()], "enum_tag_call").ok()?;
+                let tag_val = match call_res.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                    _ => return None,
+                };
+                let exp_val = i64_type.const_int(expected_tag as u64, true);
+                let cmp = builder.build_int_compare(IntPredicate::EQ, tag_val, exp_val, "tag_cmp").ok()?;
+                let _ = builder.build_conditional_branch(cmp, target_bb, next_bb);
+            }
+            Opcode::ETagSwitch => {
+                let obj_ptr = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => get_arg_ptr(&builder, 0).ok()?,
+                };
+                let table = match &ops[1] {
+                    OperandType::JumpTable(t) => t.clone(),
+                    _ => vec![],
+                };
+                let default_off = match ops[2] {
+                    OperandType::Offset(o) => o,
+                    _ => 1,
+                };
+                let def_idx = (i as i64 + default_off) as usize;
+                let default_bb = *bbs.get(def_idx)?;
+
+                let call_res = builder.build_call(get_enum_tag_fn, &[obj_ptr.into()], "enum_tag_call").ok()?;
+                let tag_val = match call_res.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                    _ => return None,
+                };
+
+                let mut switch_cases = Vec::with_capacity(table.len());
+                for case in &table {
+                    let case_val = i64_type.const_int(case.tag as u64, true);
+                    let target_idx = (i as i64 + case.offset) as usize;
+                    let target_bb = *bbs.get(target_idx)?;
+                    switch_cases.push((case_val, target_bb));
+                }
+                let _ = builder.build_switch(tag_val, default_bb, &switch_cases);
+            }
+            Opcode::AMatchFast => {
+                let regs = match &ops[0] {
+                    OperandType::RegisterList(regs) => regs.clone(),
+                    _ => vec![],
+                };
+                let consts = match &ops[1] {
+                    OperandType::ConstantList(consts) => consts.clone(),
+                    _ => vec![],
+                };
+                let off = match ops[2] {
+                    OperandType::Offset(o) => o,
+                    _ => 1,
+                };
+                let target_idx = (i as i64 + off) as usize;
+                let target_bb = *bbs.get(target_idx)?;
+                let next_bb = if i + 1 < inst_count { bbs[i + 1] } else { target_bb };
+
+                let mut matched_cond: Option<IntValue<'static>> = None;
+                for (r, c) in regs.iter().zip(consts.iter()) {
+                    let reg_val = get_reg_int(&builder, *r).ok()?;
+                    let c_int = match c {
+                        Value::Int(val) => *val,
+                        _ => 0,
+                    };
+                    let c_val = i64_type.const_int(c_int as u64, true);
+                    let eq = builder.build_int_compare(IntPredicate::EQ, reg_val, c_val, "fast_match_eq").ok()?;
+                    matched_cond = match matched_cond {
+                        Some(prev) => Some(builder.build_and(prev, eq, "and_match").ok()?),
+                        None => Some(eq),
+                    };
+                }
+                let all_matched = matched_cond.unwrap_or_else(|| i8_type.const_int(1, false).into());
+                let _ = builder.build_conditional_branch(all_matched, next_bb, target_bb);
+            }
+            Opcode::Match => {
+                let mut cases: Vec<(Pattern, i64)> = Vec::new();
+                let mut default_off: Option<i64> = None;
+                let mut p_idx = 1;
+                while p_idx < ops.len() {
+                    if p_idx + 1 < ops.len() {
+                        if let OperandType::Pattern(pat) = &ops[p_idx] {
+                            let off = match ops[p_idx + 1] {
+                                OperandType::Offset(o) => o,
+                                OperandType::Constant(Value::Int(o)) => o,
+                                _ => 1,
+                            };
+                            cases.push((pat.clone(), off));
+                            p_idx += 2;
+                            continue;
+                        }
+                    }
+                    if let OperandType::Offset(o) = ops[p_idx] {
+                        default_off = Some(o);
+                    } else if let OperandType::Constant(Value::Int(o)) = ops[p_idx] {
+                        default_off = Some(o);
+                    }
+                    p_idx += 1;
+                }
+
+                let default_target_bb = if let Some(off) = default_off {
+                    let def_idx = (i as i64 + off) as usize;
+                    *bbs.get(def_idx)?
+                } else if i + 1 < inst_count {
+                    bbs[i + 1]
+                } else {
+                    bbs[i]
+                };
+
+                let is_all_int = cases.iter().all(|(pat, _)| match pat {
+                    Pattern::Literal(Value::Int(_))
+                    | Pattern::IntRange(_, _, _)
+                    | Pattern::Bind(_)
+                    | Pattern::Wildcard => true,
+                    _ => false,
+                });
+
+                let is_all_float = cases.iter().all(|(pat, _)| match pat {
+                    Pattern::Literal(Value::Float(_))
+                    | Pattern::FloatRange(_, _, _)
+                    | Pattern::Bind(_)
+                    | Pattern::Wildcard => true,
+                    _ => false,
+                });
+
+                if is_all_int && !cases.is_empty() {
+                    let val = resolve_int(&builder, &ops[0]).ok()?;
+                    let is_pure_switch = cases.iter().all(|(pat, _)| matches!(pat, Pattern::Literal(Value::Int(_))));
+                    if is_pure_switch && cases.len() >= 2 {
+                        let mut switch_cases = Vec::with_capacity(cases.len());
+                        for (pat, off) in &cases {
+                            if let Pattern::Literal(Value::Int(c)) = pat {
+                                let target_idx = (i as i64 + off) as usize;
+                                let target_bb = *bbs.get(target_idx)?;
+                                switch_cases.push((i64_type.const_int(*c as u64, true), target_bb));
+                            }
+                        }
+                        let _ = builder.build_switch(val, default_target_bb, &switch_cases);
+                    } else {
+                        for k in 0..cases.len() {
+                            let (pat, off) = &cases[k];
+                            let target_idx = (i as i64 + off) as usize;
+                            let target_bb = *bbs.get(target_idx)?;
+                            let is_last = k + 1 == cases.len();
+                            let next_case_bb = if is_last {
+                                default_target_bb
+                            } else {
+                                context.append_basic_block(llvm_fn, &format!("match_int_{}_{}", i, k + 1))
+                            };
+
+                            match pat {
+                                Pattern::Wildcard => {
+                                    let _ = builder.build_unconditional_branch(target_bb);
+                                    break;
+                                }
+                                Pattern::Bind(dst_reg) => {
+                                    set_reg_int(&builder, *dst_reg, val).ok()?;
+                                    let _ = builder.build_unconditional_branch(target_bb);
+                                    break;
+                                }
+                                Pattern::Literal(Value::Int(c)) => {
+                                    let c_val = i64_type.const_int(*c as u64, true);
+                                    let cmp = builder.build_int_compare(IntPredicate::EQ, val, c_val, "lit_eq").ok()?;
+                                    let _ = builder.build_conditional_branch(cmp, target_bb, next_case_bb);
+                                }
+                                Pattern::IntRange(start, end, inclusive) => {
+                                    let cond = match (start, end) {
+                                        (Some(s), Some(e)) => {
+                                            let s_val = i64_type.const_int(*s as u64, true);
+                                            let e_val = i64_type.const_int(*e as u64, true);
+                                            let cmp_s = builder.build_int_compare(IntPredicate::SGE, val, s_val, "rng_s").ok()?;
+                                            let pred = if *inclusive { IntPredicate::SLE } else { IntPredicate::SLT };
+                                            let cmp_e = builder.build_int_compare(pred, val, e_val, "rng_e").ok()?;
+                                            builder.build_and(cmp_s, cmp_e, "rng_and").ok()?
+                                        }
+                                        (Some(s), None) => {
+                                            let s_val = i64_type.const_int(*s as u64, true);
+                                            builder.build_int_compare(IntPredicate::SGE, val, s_val, "rng_ge").ok()?
+                                        }
+                                        (None, Some(e)) => {
+                                            let e_val = i64_type.const_int(*e as u64, true);
+                                            let pred = if *inclusive { IntPredicate::SLE } else { IntPredicate::SLT };
+                                            builder.build_int_compare(pred, val, e_val, "rng_le").ok()?
+                                        }
+                                        (None, None) => {
+                                            let _ = builder.build_unconditional_branch(target_bb);
+                                            break;
+                                        }
+                                    };
+                                    let _ = builder.build_conditional_branch(cond, target_bb, next_case_bb);
+                                }
+                                _ => return None,
+                            }
+                            if !is_last {
+                                builder.position_at_end(next_case_bb);
+                            }
+                        }
+                    }
+                } else if is_all_float && !cases.is_empty() {
+                    let val = resolve_float(&builder, &ops[0]).ok()?;
+                    for k in 0..cases.len() {
+                        let (pat, off) = &cases[k];
+                        let target_idx = (i as i64 + off) as usize;
+                        let target_bb = *bbs.get(target_idx)?;
+                        let is_last = k + 1 == cases.len();
+                        let next_case_bb = if is_last {
+                            default_target_bb
+                        } else {
+                            context.append_basic_block(llvm_fn, &format!("match_flt_{}_{}", i, k + 1))
+                        };
+
+                        match pat {
+                            Pattern::Wildcard => {
+                                let _ = builder.build_unconditional_branch(target_bb);
+                                break;
+                            }
+                            Pattern::Bind(dst_reg) => {
+                                set_reg_float(&builder, *dst_reg, val).ok()?;
+                                let _ = builder.build_unconditional_branch(target_bb);
+                                break;
+                            }
+                            Pattern::Literal(Value::Float(f)) => {
+                                let f_val = f64_type.const_float(*f);
+                                let cmp = builder.build_float_compare(FloatPredicate::OEQ, val, f_val, "flt_eq").ok()?;
+                                let _ = builder.build_conditional_branch(cmp, target_bb, next_case_bb);
+                            }
+                            Pattern::FloatRange(start, end, inclusive) => {
+                                let cond = match (start, end) {
+                                    (Some(s), Some(e)) => {
+                                        let s_val = f64_type.const_float(*s);
+                                        let e_val = f64_type.const_float(*e);
+                                        let cmp_s = builder.build_float_compare(FloatPredicate::OGE, val, s_val, "flt_rng_s").ok()?;
+                                        let pred = if *inclusive { FloatPredicate::OLE } else { FloatPredicate::OLT };
+                                        let cmp_e = builder.build_float_compare(pred, val, e_val, "flt_rng_e").ok()?;
+                                        builder.build_and(cmp_s, cmp_e, "flt_rng_and").ok()?
+                                    }
+                                    (Some(s), None) => {
+                                        let s_val = f64_type.const_float(*s);
+                                        builder.build_float_compare(FloatPredicate::OGE, val, s_val, "flt_rng_ge").ok()?
+                                    }
+                                    (None, Some(e)) => {
+                                        let e_val = f64_type.const_float(*e);
+                                        let pred = if *inclusive { FloatPredicate::OLE } else { FloatPredicate::OLT };
+                                        builder.build_float_compare(pred, val, e_val, "flt_rng_le").ok()?
+                                    }
+                                    (None, None) => {
+                                        let _ = builder.build_unconditional_branch(target_bb);
+                                        break;
+                                    }
+                                };
+                                let _ = builder.build_conditional_branch(cond, target_bb, next_case_bb);
+                            }
+                            _ => return None,
+                        }
+                        if !is_last {
+                            builder.position_at_end(next_case_bb);
+                        }
+                    }
+                } else if !cases.is_empty() {
+                    let is_all_fixed_array = cases.iter().all(|(pat, _)| match pat {
+                        Pattern::IntArray(arr_pat) | Pattern::Array(arr_pat) => {
+                            arr_pat.segments.iter().all(|seg| matches!(seg, ListSegment::Element(_)))
+                        }
+                        Pattern::Wildcard => true,
+                        _ => false,
+                    });
+
+                    let data_ptr_opt = match ops[0] {
+                        OperandType::Argument(a) if arg_int_ptrs.contains_key(&a) => Some(arg_int_ptrs[&a]),
+                        _ => None,
+                    };
+
+                    if is_all_fixed_array && data_ptr_opt.is_some() {
+                        let data_ptr = data_ptr_opt.unwrap();
+                        for k in 0..cases.len() {
+                            let (pat, off) = &cases[k];
+                            let target_idx = (i as i64 + off) as usize;
+                            let target_bb = *bbs.get(target_idx)?;
+                            let is_last = k + 1 == cases.len();
+                            let next_case_bb = if is_last {
+                                default_target_bb
+                            } else {
+                                context.append_basic_block(llvm_fn, &format!("match_arr_{}_{}", i, k + 1))
+                            };
+
+                            match pat {
+                                Pattern::Wildcard => {
+                                    let _ = builder.build_unconditional_branch(target_bb);
+                                    break;
+                                }
+                                Pattern::IntArray(arr_pat) | Pattern::Array(arr_pat) => {
+                                    let mut all_elem_cond: Option<IntValue<'static>> = None;
+                                    for (elem_idx, seg) in arr_pat.segments.iter().enumerate() {
+                                        if let ListSegment::Element(elem_pat) = seg {
+                                            let idx_val = i64_type.const_int(elem_idx as u64, false);
+                                            let elem_ptr = unsafe { builder.build_gep(i64_type, data_ptr, &[idx_val], "arr_elem_ptr") }.ok()?;
+                                            let elem_val = builder.build_load(i64_type, elem_ptr, "arr_elem").ok()?.into_int_value();
+
+                                            let elem_cond = match elem_pat {
+                                                Pattern::Literal(Value::Int(c)) => {
+                                                    let c_val = i64_type.const_int(*c as u64, true);
+                                                    builder.build_int_compare(IntPredicate::EQ, elem_val, c_val, "elem_eq").ok()?
+                                                }
+                                                Pattern::IntRange(start, end, inclusive) => {
+                                                    match (start, end) {
+                                                        (Some(s), Some(e)) => {
+                                                            let s_val = i64_type.const_int(*s as u64, true);
+                                                            let e_val = i64_type.const_int(*e as u64, true);
+                                                            let cmp_s = builder.build_int_compare(IntPredicate::SGE, elem_val, s_val, "elem_rng_s").ok()?;
+                                                            let pred = if *inclusive { IntPredicate::SLE } else { IntPredicate::SLT };
+                                                            let cmp_e = builder.build_int_compare(pred, elem_val, e_val, "elem_rng_e").ok()?;
+                                                            builder.build_and(cmp_s, cmp_e, "elem_rng_and").ok()?
+                                                        }
+                                                        (Some(s), None) => {
+                                                            let s_val = i64_type.const_int(*s as u64, true);
+                                                            builder.build_int_compare(IntPredicate::SGE, elem_val, s_val, "elem_rng_ge").ok()?
+                                                        }
+                                                        (None, Some(e)) => {
+                                                            let e_val = i64_type.const_int(*e as u64, true);
+                                                            let pred = if *inclusive { IntPredicate::SLE } else { IntPredicate::SLT };
+                                                            builder.build_int_compare(pred, elem_val, e_val, "elem_rng_le").ok()?
+                                                        }
+                                                        (None, None) => i8_type.const_int(1, false).into(),
+                                                    }
+                                                }
+                                                Pattern::Bind(dst_reg) => {
+                                                    set_reg_int(&builder, *dst_reg, elem_val).ok()?;
+                                                    i8_type.const_int(1, false).into()
+                                                }
+                                                Pattern::Wildcard => i8_type.const_int(1, false).into(),
+                                                _ => return None,
+                                            };
+
+                                            all_elem_cond = match all_elem_cond {
+                                                Some(prev) => Some(builder.build_and(prev, elem_cond, "arr_and").ok()?),
+                                                None => Some(elem_cond),
+                                            };
+                                        }
+                                    }
+                                    let final_cond = all_elem_cond.unwrap_or_else(|| i8_type.const_int(1, false).into());
+                                    let _ = builder.build_conditional_branch(final_cond, target_bb, next_case_bb);
+                                }
+                                _ => return None,
+                            }
+                            if !is_last {
+                                builder.position_at_end(next_case_bb);
+                            }
+                        }
+                    } else {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
             }
             _ => {
                 return None;
@@ -1319,4 +1906,3 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
 pub fn compile_with_llvm(func: &Function) -> Option<NativeJitFn> {
     compile_with_llvm_ir(func).map(|(f, _)| f)
 }
-

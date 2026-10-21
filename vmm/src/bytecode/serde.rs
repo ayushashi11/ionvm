@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::sync::{Arc, RwLock};
 
 use crate::bytecode::instruction::{Bytecode, Instruction, JumpCase, OperandType};
 use crate::bytecode::opcode::Opcode;
-use crate::lang::types::{Function, FunctionType, Object, Pattern, Property, Protection, Value};
+use crate::lang::types::{ArrayPattern, Function, FunctionType, ListSegment, Object, Pattern, Property, Protection, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SerError {
@@ -120,10 +120,21 @@ pub fn write_object<W: Write>(w: &mut W, obj: &Object) -> Result<(), SerError> {
     if let Some(proto) = &obj.prototype {
         write_object(w, &proto.read().unwrap())?;
     }
-    write_u64(w, obj.properties.len() as u64)?;
+    let property_count = obj.properties.keys().filter(|key| crate::lang::types::parse_numeric_key(key).is_none()).count()
+        + obj.indexed.iter().filter(|entry| entry.is_some()).count();
+    write_u64(w, property_count as u64)?;
     for (k, v) in &obj.properties {
+        if crate::lang::types::parse_numeric_key(k).is_some() {
+            continue;
+        }
         write_string(w, k)?;
         write_property(w, v)?;
+    }
+    for (idx, prop) in obj.indexed.iter().enumerate() {
+        if let Some(prop) = prop {
+            write_string(w, &idx.to_string())?;
+            write_property(w, prop)?;
+        }
     }
     Ok(())
 }
@@ -147,13 +158,89 @@ pub fn read_object<R: Read>(r: &mut R) -> Result<Arc<RwLock<Object>>, SerError> 
             }
             indexed[idx] = Some(prop.clone());
         }
-        properties.insert(name, prop);
+        if crate::lang::types::parse_numeric_key(&name).is_none() {
+            properties.insert(name, prop);
+        }
     }
     Ok(Arc::new(RwLock::new(Object {
         prototype: proto,
         properties,
         indexed,
     })))
+}
+
+fn write_load_time_object<W: Write>(
+    w: &mut W,
+    obj: &Object,
+    object_names: &HashMap<usize, String>,
+) -> Result<(), SerError> {
+    match &obj.prototype {
+        Some(proto) => {
+            let ptr = Arc::as_ptr(proto) as usize;
+            let name = object_names.get(&ptr).ok_or_else(|| {
+                SerError::InvalidTag("load-time object prototype is not registered".to_string())
+            })?;
+            write_bool(w, true)?;
+            write_string(w, name)?;
+        }
+        None => write_bool(w, false)?,
+    }
+
+    let property_count = obj.properties.keys().filter(|key| crate::lang::types::parse_numeric_key(key).is_none()).count()
+        + obj.indexed.iter().filter(|entry| entry.is_some()).count();
+    write_u64(w, property_count as u64)?;
+    for (key, prop) in &obj.properties {
+        if crate::lang::types::parse_numeric_key(key).is_some() {
+            continue;
+        }
+        write_string(w, key)?;
+        write_property(w, prop)?;
+    }
+    for (idx, prop) in obj.indexed.iter().enumerate() {
+        if let Some(prop) = prop {
+            write_string(w, &idx.to_string())?;
+            write_property(w, prop)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_load_time_object<R: Read>(
+    r: &mut R,
+    objects: &HashMap<String, Arc<RwLock<Object>>>,
+) -> Result<Object, SerError> {
+    let prototype = if read_bool(r)? {
+        let name = read_string(r)?;
+        Some(objects.get(&name).cloned().ok_or_else(|| {
+            SerError::InvalidTag(format!(
+                "load-time object prototype '{}' must be initialized before its subclass",
+                name
+            ))
+        })?)
+    } else {
+        None
+    };
+
+    let count = read_u64(r)? as usize;
+    let mut properties = HashMap::new();
+    let mut indexed = Vec::new();
+    for _ in 0..count {
+        let name = read_string(r)?;
+        let prop = read_property(r)?;
+        if let Some(idx) = crate::lang::types::parse_numeric_key(&name) {
+            if idx >= indexed.len() {
+                indexed.resize(idx + 1, None);
+            }
+            indexed[idx] = Some(prop);
+        } else {
+            properties.insert(name, prop);
+        }
+    }
+    Ok(Object {
+        prototype,
+        properties,
+        indexed,
+    })
 }
 
 pub fn write_value<W: Write>(w: &mut W, val: &Value) -> Result<(), SerError> {
@@ -260,6 +347,63 @@ pub fn read_value<R: Read>(r: &mut R) -> Result<Value, SerError> {
     }
 }
 
+pub fn write_list_segment<W: Write>(w: &mut W, seg: &ListSegment) -> Result<(), SerError> {
+    match seg {
+        ListSegment::Element(pat) => {
+            write_string(w, "elem")?;
+            write_pattern(w, pat)
+        }
+        ListSegment::Elements(pats) => {
+            write_string(w, "elems")?;
+            write_u64(w, pats.len() as u64)?;
+            for p in pats {
+                write_pattern(w, p)?;
+            }
+            Ok(())
+        }
+        ListSegment::BindList(reg) => {
+            write_string(w, "bind_list")?;
+            write_u64(w, *reg as u64)
+        }
+        ListSegment::WildcardList => write_string(w, "wildcard_list"),
+    }
+}
+
+pub fn read_list_segment<R: Read>(r: &mut R) -> Result<ListSegment, SerError> {
+    let tag = read_string(r)?;
+    match tag.as_str() {
+        "elem" => Ok(ListSegment::Element(read_pattern(r)?)),
+        "elems" => {
+            let count = read_u64(r)? as usize;
+            let mut pats = Vec::with_capacity(count);
+            for _ in 0..count {
+                pats.push(read_pattern(r)?);
+            }
+            Ok(ListSegment::Elements(pats))
+        }
+        "bind_list" => Ok(ListSegment::BindList(read_u64(r)? as usize)),
+        "wildcard_list" => Ok(ListSegment::WildcardList),
+        _ => Err(SerError::InvalidTag(tag)),
+    }
+}
+
+pub fn write_array_pattern<W: Write>(w: &mut W, pat: &ArrayPattern) -> Result<(), SerError> {
+    write_u64(w, pat.segments.len() as u64)?;
+    for seg in &pat.segments {
+        write_list_segment(w, seg)?;
+    }
+    Ok(())
+}
+
+pub fn read_array_pattern<R: Read>(r: &mut R) -> Result<ArrayPattern, SerError> {
+    let count = read_u64(r)? as usize;
+    let mut segments = Vec::with_capacity(count);
+    for _ in 0..count {
+        segments.push(read_list_segment(r)?);
+    }
+    Ok(ArrayPattern { segments })
+}
+
 pub fn write_pattern<W: Write>(w: &mut W, pattern: &Pattern) -> Result<(), SerError> {
     match pattern {
         Pattern::Wildcard => write_string(w, "wildcard"),
@@ -288,6 +432,54 @@ pub fn write_pattern<W: Write>(w: &mut W, pattern: &Pattern) -> Result<(), SerEr
             }
             Ok(())
         }
+        Pattern::IntRange(start, end, inclusive) => {
+            write_string(w, "int_range")?;
+            match start {
+                Some(s) => {
+                    write_bool(w, true)?;
+                    write_i64(w, *s)?;
+                }
+                None => write_bool(w, false)?,
+            }
+            match end {
+                Some(e) => {
+                    write_bool(w, true)?;
+                    write_i64(w, *e)?;
+                }
+                None => write_bool(w, false)?,
+            }
+            write_bool(w, *inclusive)
+        }
+        Pattern::FloatRange(start, end, inclusive) => {
+            write_string(w, "float_range")?;
+            match start {
+                Some(s) => {
+                    write_bool(w, true)?;
+                    write_f64(w, *s)?;
+                }
+                None => write_bool(w, false)?,
+            }
+            match end {
+                Some(e) => {
+                    write_bool(w, true)?;
+                    write_f64(w, *e)?;
+                }
+                None => write_bool(w, false)?,
+            }
+            write_bool(w, *inclusive)
+        }
+        Pattern::Array(arr_pat) => {
+            write_string(w, "array_pat")?;
+            write_array_pattern(w, arr_pat)
+        }
+        Pattern::IntArray(arr_pat) => {
+            write_string(w, "int_array_pat")?;
+            write_array_pattern(w, arr_pat)
+        }
+        Pattern::FloatArray(arr_pat) => {
+            write_string(w, "float_array_pat")?;
+            write_array_pattern(w, arr_pat)
+        }
     }
 }
 
@@ -315,6 +507,25 @@ pub fn read_pattern<R: Read>(r: &mut R) -> Result<Pattern, SerError> {
             }
             Ok(Pattern::Object(props))
         }
+        "int_range" => {
+            let has_start = read_bool(r)?;
+            let start = if has_start { Some(read_i64(r)?) } else { None };
+            let has_end = read_bool(r)?;
+            let end = if has_end { Some(read_i64(r)?) } else { None };
+            let inclusive = read_bool(r)?;
+            Ok(Pattern::IntRange(start, end, inclusive))
+        }
+        "float_range" => {
+            let has_start = read_bool(r)?;
+            let start = if has_start { Some(read_f64(r)?) } else { None };
+            let has_end = read_bool(r)?;
+            let end = if has_end { Some(read_f64(r)?) } else { None };
+            let inclusive = read_bool(r)?;
+            Ok(Pattern::FloatRange(start, end, inclusive))
+        }
+        "array_pat" => Ok(Pattern::Array(read_array_pattern(r)?)),
+        "int_array_pat" => Ok(Pattern::IntArray(read_array_pattern(r)?)),
+        "float_array_pat" => Ok(Pattern::FloatArray(read_array_pattern(r)?)),
         _ => Err(SerError::InvalidTag(tag)),
     }
 }
@@ -391,6 +602,10 @@ pub fn write_operand<W: Write>(w: &mut W, op: &OperandType) -> Result<(), SerErr
                 write_i64(w, c.offset)?;
             }
         }
+        OperandType::Captured(slot) => {
+            write_string(w, "captured")?;
+            write_u64(w, *slot as u64)?;
+        }
     }
     Ok(())
 }
@@ -449,6 +664,7 @@ pub fn read_operand<R: Read>(r: &mut R) -> Result<OperandType, SerError> {
             }
             Ok(OperandType::JumpTable(cases))
         }
+        "captured" => Ok(OperandType::Captured(read_u64(r)? as usize)),
         _ => Err(SerError::InvalidTag(tag)),
     }
 }
@@ -489,6 +705,7 @@ pub fn write_function<W: Write>(w: &mut W, f: &Function) -> Result<(), SerError>
         FunctionType::Regular => "Regular",
         FunctionType::Native => "Native",
         FunctionType::Ffi(_) => "Ffi",
+        FunctionType::Closure => "Closure",
     };
     write_string(w, fn_type_str)?;
     write_string(w, "Regular")?; // data tag
@@ -513,6 +730,7 @@ pub fn read_function<R: Read>(r: &mut R) -> Result<Function, SerError> {
         "Regular" => FunctionType::Regular,
         "Native" => FunctionType::Native,
         "Ffi" => FunctionType::Ffi(name.clone()),
+        "Closure" => FunctionType::Closure,
         _ => FunctionType::Regular,
     };
     let _data_tag = read_string(r)?;
@@ -527,6 +745,7 @@ pub fn read_function<R: Read>(r: &mut R) -> Result<Function, SerError> {
         fn_type,
         call_counter: 0,
         jit_compiled_fn: None,
+        closure_env: None,
     })
 }
 
@@ -536,6 +755,42 @@ pub fn write_bytecode<W: Write>(w: &mut W, bc: &Bytecode) -> Result<(), SerError
         write_function(w, f)?;
     }
     write_string(w, &bc.entry_point)?;
+    write_u64(w, bc.native_declarations.len() as u64)?;
+    for decl in &bc.native_declarations {
+        write_string(w, &decl.lib_name)?;
+        write_string(w, &decl.namespace)?;
+    }
+    let object_names: HashMap<usize, String> = bc.object_inits.iter()
+        .map(|(name, object)| (Arc::as_ptr(object) as usize, name.clone()))
+        .collect();
+    let mut ordered_objects = Vec::with_capacity(bc.object_inits.len());
+    let mut remaining: Vec<usize> = (0..bc.object_inits.len()).collect();
+    let mut written = HashSet::new();
+    while !remaining.is_empty() {
+        let ready_idx = remaining.iter().position(|&idx| {
+            let object = bc.object_inits[idx].1.read().unwrap();
+            match &object.prototype {
+                None => true,
+                Some(proto) => {
+                    let proto_ptr = Arc::as_ptr(proto) as usize;
+                    object_names
+                        .get(&proto_ptr)
+                        .and_then(|proto_name| bc.object_inits.iter().position(|(name, _)| name == proto_name))
+                        .is_none_or(|dependency_idx| written.contains(&dependency_idx))
+                }
+            }
+        });
+        let idx = ready_idx.map(|pos| remaining.remove(pos)).unwrap_or_else(|| remaining.remove(0));
+        written.insert(idx);
+        ordered_objects.push(idx);
+    }
+
+    write_u64(w, ordered_objects.len() as u64)?;
+    for idx in ordered_objects {
+        let (name, object) = &bc.object_inits[idx];
+        write_string(w, name)?;
+        write_load_time_object(w, &object.read().unwrap(), &object_names)?;
+    }
     Ok(())
 }
 
@@ -549,9 +804,38 @@ pub fn read_bytecode<R: Read>(r: &mut R) -> Result<Bytecode, SerError> {
         functions.push(read_function(r)?);
     }
     let entry_point = read_string(r)?;
+    let native_declarations = match read_u64(r) {
+        Ok(decl_count) => {
+            let mut decls = Vec::with_capacity(decl_count as usize);
+            for _ in 0..decl_count {
+                let lib_name = read_string(r)?;
+                let namespace = read_string(r)?;
+                decls.push(crate::bytecode::instruction::NativeDeclaration { lib_name, namespace });
+            }
+            decls
+        }
+        Err(_) => Vec::new(),
+    };
+
+    let object_inits = match read_u64(r) {
+        Ok(init_count) => {
+            let mut inits = Vec::with_capacity(init_count as usize);
+            let mut objects = HashMap::new();
+            for _ in 0..init_count {
+                let name = read_string(r)?;
+                let object = Arc::new(RwLock::new(read_load_time_object(r, &objects)?));
+                objects.insert(name.clone(), Arc::clone(&object));
+                inits.push((name, object));
+            }
+            inits
+        }
+        Err(_) => Vec::new(),
+    };
+
     Ok(Bytecode {
         functions,
         entry_point,
+        native_declarations,
+        object_inits,
     })
 }
-

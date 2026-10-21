@@ -1,10 +1,10 @@
 //! OS functions for the standard library
 
-use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue};
+use crate::{FfiError, FfiFunction, FfiRegistry, FfiResult, FfiValue, RawFfiFunction};
 
 pub struct GetEnv;
 
-impl FfiFunction for GetEnv {
+impl RawFfiFunction for GetEnv {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 1 {
             return Err(FfiError::ArgumentCount {
@@ -14,8 +14,8 @@ impl FfiFunction for GetEnv {
         }
         match &args[0] {
             FfiValue::String(key) => match std::env::var(key) {
-                Ok(val) => Ok(FfiValue::String(val)),
-                Err(_) => Ok(FfiValue::Undefined),
+                Ok(val) => Ok(FfiValue::String(val).into()),
+                Err(_) => Ok(FfiValue::Undefined.into()),
             },
             _ => Err(FfiError::ArgumentType {
                 expected: "String".to_string(),
@@ -37,9 +37,11 @@ impl FfiFunction for GetEnv {
     }
 }
 
+impl FfiFunction for GetEnv {}
+
 pub struct SetEnv;
 
-impl FfiFunction for SetEnv {
+impl RawFfiFunction for SetEnv {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if args.len() != 2 {
             return Err(FfiError::ArgumentCount {
@@ -53,7 +55,7 @@ impl FfiFunction for SetEnv {
                 unsafe {
                     std::env::set_var(key, val);
                 }
-                Ok(FfiValue::Unit)
+                Ok(FfiValue::Unit.into())
             }
             _ => Err(FfiError::ArgumentType {
                 expected: "String, String".to_string(),
@@ -75,9 +77,11 @@ impl FfiFunction for SetEnv {
     }
 }
 
+impl FfiFunction for SetEnv {}
+
 pub struct OsName;
 
-impl FfiFunction for OsName {
+impl RawFfiFunction for OsName {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if !args.is_empty() {
             return Err(FfiError::ArgumentCount {
@@ -85,7 +89,7 @@ impl FfiFunction for OsName {
                 got: args.len(),
             });
         }
-        Ok(FfiValue::String(std::env::consts::OS.to_string()))
+        Ok(FfiValue::String(std::env::consts::OS.to_string()).into())
     }
 
     fn name(&self) -> &str {
@@ -101,9 +105,11 @@ impl FfiFunction for OsName {
     }
 }
 
+impl FfiFunction for OsName {}
+
 pub struct OsArch;
 
-impl FfiFunction for OsArch {
+impl RawFfiFunction for OsArch {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if !args.is_empty() {
             return Err(FfiError::ArgumentCount {
@@ -111,7 +117,7 @@ impl FfiFunction for OsArch {
                 got: args.len(),
             });
         }
-        Ok(FfiValue::String(std::env::consts::ARCH.to_string()))
+        Ok(FfiValue::String(std::env::consts::ARCH.to_string()).into())
     }
 
     fn name(&self) -> &str {
@@ -127,9 +133,11 @@ impl FfiFunction for OsArch {
     }
 }
 
+impl FfiFunction for OsArch {}
+
 pub struct GetPid;
 
-impl FfiFunction for GetPid {
+impl RawFfiFunction for GetPid {
     fn call(&self, _ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
         if !args.is_empty() {
             return Err(FfiError::ArgumentCount {
@@ -137,7 +145,7 @@ impl FfiFunction for GetPid {
                 got: args.len(),
             });
         }
-        Ok(FfiValue::Number(std::process::id() as f64))
+        Ok(FfiValue::Number(std::process::id() as f64).into())
     }
 
     fn name(&self) -> &str {
@@ -152,6 +160,8 @@ impl FfiFunction for GetPid {
         Some("Get the current process ID")
     }
 }
+
+impl FfiFunction for GetPid {}
 
 pub fn register_os_functions(registry: &mut FfiRegistry) {
     registry.register(GetEnv);
@@ -185,7 +195,7 @@ mod tests {
         assert_eq!(res, FfiValue::String(std::env::consts::ARCH.to_string()));
 
         let res = registry.call(&mut ctx, "GetPid", vec![]).unwrap();
-        assert!(matches!(res, FfiValue::Number(_)));
+        assert!(matches!(res, crate::FfiReturn::Value(FfiValue::Number(_))));
 
         registry
             .call(
