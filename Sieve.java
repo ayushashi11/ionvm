@@ -25,7 +25,7 @@ public class Sieve {
     }
 
     public static void main(String[] args) {
-        int[] limits = {10000000, 50000000};
+        int[] limits = {10000000, 50000000, 100000000};
         for (int limit : limits) {
             long t0 = System.nanoTime();
             int count = countPrimes(limit);

@@ -1,6 +1,3 @@
 [workspace]
-members = ["vmm", "vm-ffi", "python-ionvm"]
+members = ["vmm", "vm-ffi"]
 resolver = "2"
-
-[workspace.dependencies]
-pyo3 = "0.20"
