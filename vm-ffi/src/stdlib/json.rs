@@ -59,6 +59,7 @@ pub fn json_to_ffi(val: serde_json::Value) -> FfiValue {
         }
         serde_json::Value::Object(map) => {
             let mut obj = HashMap::new();
+            obj.insert("@".to_string(), FfiValue::Atom("JSON".to_string()));
             for (k, v) in map {
                 obj.insert(k, json_to_ffi(v));
             }
@@ -117,39 +118,70 @@ json_function!(JsonStringify, 1, FfiType::String, "Serializes value to JSON stri
     }
 });
 
-json_function!(JsonGet, 2, FfiType::String, "Extracts a key from a JSON string without full decoding", |args| {
-    let json_str = match &args[0] {
-        FfiValue::String(s) => s,
-        other => return Err(FfiError::ArgumentType {
-            expected: "String".to_string(),
-            got: other.type_name().to_string(),
-        }),
-    };
-    let key = match &args[1] {
-        FfiValue::String(s) => s,
-        other => return Err(FfiError::ArgumentType {
-            expected: "String".to_string(),
-            got: other.type_name().to_string(),
-        }),
-    };
+pub struct JsonGet;
 
-    if let Ok(mut current) = serde_json::from_str::<serde_json::Value>(json_str) {
-        for part in key.split('.') {
-            match current {
-                serde_json::Value::Object(mut map) => {
-                    if let Some(val) = map.remove(part) {
-                        current = val;
-                    } else {
-                        return Ok(FfiValue::Unit);
-                    }
-                }
-                _ => return Ok(FfiValue::Unit),
-            }
+impl RawFfiFunction for JsonGet {
+    fn call(&self, ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
+        if args.len() != 2 {
+            return Err(FfiError::ArgumentCount {
+                expected: 2,
+                got: args.len(),
+            });
         }
-        return Ok(json_to_ffi(current));
+        let json_str = match &args[0] {
+            FfiValue::String(s) => s,
+            other => {
+                return Err(FfiError::ArgumentType {
+                    expected: "String".to_string(),
+                    got: other.type_name().to_string(),
+                });
+            }
+        };
+        let key = match &args[1] {
+            FfiValue::String(s) => s,
+            other => {
+                return Err(FfiError::ArgumentType {
+                    expected: "String".to_string(),
+                    got: other.type_name().to_string(),
+                });
+            }
+        };
+
+        let value = serde_json::from_str::<serde_json::Value>(json_str)
+            .ok()
+            .and_then(|mut current| {
+                for part in key.split('.') {
+                    current = current.as_object_mut()?.remove(part)?;
+                }
+                Some(current)
+            });
+        let option = match value {
+            Some(value) => {
+                ctx.make_enum("Option", "some", Some(json_to_ffi(value)))
+            }
+            None => ctx.make_enum("Option", "none", None),
+        };
+        Ok(option.into())
     }
-    Ok(FfiValue::Unit)
-});
+
+    fn name(&self) -> &str {
+        "JsonGet"
+    }
+
+    fn arity(&self) -> usize {
+        2
+    }
+
+    fn return_type(&self) -> FfiType {
+        FfiType::Any
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Looks up a JSON path and returns Option[Value]")
+    }
+}
+
+impl FfiFunction for JsonGet {}
 
 /// Register all JSON functions
 pub fn register_json_functions(registry: &mut FfiRegistry) {

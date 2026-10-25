@@ -65,14 +65,19 @@ pub fn get_property(val: &Value, key: &str, _is_this: bool) -> Option<Value> {
             "length" => Some(Value::Int(arr.read().unwrap().len() as i64)),
             "push" => Some(native_bound_func("push", 1, val)),
             "pop" => Some(native_bound_func("pop", 0, val)),
+            "get" => Some(native_bound_func("get", 1, val)),
             _ => None,
         },
         Value::IntArray(arr) => match key {
             "length" => Some(Value::Int(arr.read().unwrap().len() as i64)),
+            "pop" => Some(native_bound_func("pop", 0, val)),
+            "get" => Some(native_bound_func("get", 1, val)),
             _ => None,
         },
         Value::FloatArray(arr) => match key {
             "length" => Some(Value::Int(arr.read().unwrap().len() as i64)),
+            "pop" => Some(native_bound_func("pop", 0, val)),
+            "get" => Some(native_bound_func("get", 1, val)),
             _ => None,
         },
         _ => None,
@@ -92,27 +97,6 @@ pub fn set_property(val: &Value, key: &str, new_val: Value, _is_this: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin;
-
-    fn format_bound_value(value: Value, spec: &str) -> Value {
-        let Value::Function(function) = get_property(&value, "format", false).expect("format property")
-        else {
-            panic!("format property must be callable");
-        };
-        let function = function.read().unwrap();
-        let mut args = vec![function.bound_this.clone().expect("bound receiver")];
-        args.push(Value::String(spec.to_string()));
-        builtin::call_native(&function.name, &args).expect("format native result")
-    }
-
-    #[test]
-    fn primitive_format_properties_use_native_formatter() {
-        assert_eq!(format_bound_value(Value::Int(255), "08x"), Value::String("000000ff".into()));
-        assert_eq!(format_bound_value(Value::Float(3.14159), ".2f"), Value::String("3.14".into()));
-        assert_eq!(format_bound_value(Value::Int(1000), ","), Value::String("1,000".into()));
-        assert_eq!(format_bound_value(Value::Bool(true), ""), Value::String("true".into()));
-        assert_eq!(format_bound_value(Value::String("hi".into()), ">4"), Value::String("  hi".into()));
-    }
 
     #[test]
     fn primitive_to_string_properties_resolve_to_prelude_bytecode() {

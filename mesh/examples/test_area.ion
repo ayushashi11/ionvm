@@ -1,19 +1,22 @@
 enum Shape:
-    Circle(Float)
-    Rect(Float, Float)
-    Line
+    circle(Float)
+    rect(Float, Float)
+    line
 
-enum Result[T,U]:
-    Ok(T)
-    Err(U)
+impl ToString for Shape:
+    fn to_string() -> String:
+        return match self:
+            :circle(r) => "Circle(radius=${r})"
+            :rect(w, h) => "Rect(width=${w}, height=${h})"
+            :line => "Line"
 
-fn area(s Shape) -> Result[Float, String]:
-    match s:
-        :Circle(r) =>
+fn area(s: Shape) -> Result[Float, String]:
+    return match s:
+        :circle(r) =>
             println("Calculating area of circle with radius", r)
-            :Ok(r * r)
-        :Rect(w, h) => :Ok(w * h)
-        _ => :Err("Unsupported shape")
+            :ok(r * r)
+        :rect(w, h) => :ok(w * h)
+        _ => :err("Unsupported shape")
 
 const proc = fn():
     println("inside proc! yay!")
@@ -21,10 +24,11 @@ const proc = fn():
     println("proc recievd", dat)
 
 const v = proc
-debug(v)
+println(v)
 const p = spawn v()
-const r = :Circle(3.5)
-debug(r)
+const r = :rect(3.0, 4.0)
+println(r.to_string())
 const a = area(r)
-debug(a)
+println(a)
+println(Option)
 send(p, "hello")

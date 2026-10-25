@@ -108,7 +108,7 @@ pub enum FunctionType {
     Closure,
 }
 
-pub type NativeJitFn = unsafe extern "C" fn(registers: *mut Value, args: *const Value, env: *mut Value, out_res: *mut Value);
+pub type NativeJitFn = unsafe extern "C" fn(registers: *mut Value, self_value: *mut Value, args: *const Value, env: *mut Value, out_res: *mut Value);
 
 #[derive(Clone, Debug)]
 pub struct Function {

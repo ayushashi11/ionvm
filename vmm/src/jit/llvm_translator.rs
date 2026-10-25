@@ -267,7 +267,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     let _i1_type = context.bool_type();
     let void_type = context.void_type();
 
-    let fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+    let fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
     let fn_name = format!("jit_{}", func.name);
     let llvm_fn = module.add_function(&fn_name, fn_type, None);
 
@@ -321,9 +321,10 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     }
 
     let regs_param = llvm_fn.get_nth_param(0)?.into_pointer_value();
-    let args_param = llvm_fn.get_nth_param(1)?.into_pointer_value();
-    let env_param = llvm_fn.get_nth_param(2)?.into_pointer_value();
-    let out_res_param = llvm_fn.get_nth_param(3)?.into_pointer_value();
+    let self_param = llvm_fn.get_nth_param(1)?.into_pointer_value();
+    let args_param = llvm_fn.get_nth_param(2)?.into_pointer_value();
+    let env_param = llvm_fn.get_nth_param(3)?.into_pointer_value();
+    let out_res_param = llvm_fn.get_nth_param(4)?.into_pointer_value();
 
     let val_size = std::mem::size_of::<Value>();
 
@@ -441,6 +442,11 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
             OperandType::Register(r) => get_reg_int(builder, *r),
             OperandType::Argument(a) => get_arg_int(builder, *a),
             OperandType::Captured(c) => get_cap_int(builder, *c),
+            OperandType::This => {
+                let offset = i64_type.const_int(8, false);
+                let val_ptr = unsafe { builder.build_gep(i8_type, self_param, &[offset], "this_val_ptr") }?;
+                Ok(builder.build_load(i64_type, val_ptr, "this_int")?.into_int_value())
+            },
             OperandType::Constant(Value::Int(c)) => Ok(i64_type.const_int(*c as u64, true)),
             OperandType::Constant(Value::Float(c)) => Ok(i64_type.const_int(*c as i64 as u64, true)),
             OperandType::Constant(Value::Bool(b)) => Ok(i64_type.const_int(if *b { 1 } else { 0 }, false)),
@@ -461,6 +467,11 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
             OperandType::Register(r) => get_reg_float(builder, *r),
             OperandType::Argument(a) => get_arg_float(builder, *a),
             OperandType::Captured(c) => get_cap_float(builder, *c),
+            OperandType::This => {
+                let offset = i64_type.const_int(8, false);
+                let val_ptr = unsafe { builder.build_gep(i8_type, self_param, &[offset], "this_val_ptr") }?;
+                Ok(builder.build_load(f64_type, val_ptr, "this_float")?.into_float_value())
+            },
             OperandType::Constant(Value::Float(c)) => Ok(f64_type.const_float(*c)),
             OperandType::Constant(Value::Int(c)) => Ok(f64_type.const_float(*c as f64)),
             _ => Ok(f64_type.const_float(0.0)),
@@ -740,6 +751,14 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                             let val = builder.build_load(i64_type, src_val_ptr, "val").ok()?;
                             builder.build_store(dst_val_ptr, val).ok()?;
                         }
+                        OperandType::This => {
+                            let dst_ptr = get_reg_ptr(&builder, dst).ok()?;
+                            let _ = builder.build_call(
+                                copy_value_fn,
+                                &[dst_ptr.into(), self_param.into()],
+                                "copy_this_to_reg",
+                            ).ok()?;
+                        }
                         _ => {
                             let val = resolve_int(&builder, &ops[0]).ok()?;
                             set_reg_int(&builder, dst, val).ok()?;
@@ -757,6 +776,14 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                             let cap_val_ptr = unsafe { builder.build_gep(i8_type, cap_ptr, &[val_offset], "cap_val_ptr") }.ok()?;
                             let val = builder.build_load(i64_type, src_val_ptr, "val").ok()?;
                             builder.build_store(cap_val_ptr, val).ok()?;
+                        }
+                        OperandType::This => {
+                            let cap_ptr = get_cap_ptr(&builder, cap_idx).ok()?;
+                            let _ = builder.build_call(
+                                copy_value_fn,
+                                &[cap_ptr.into(), self_param.into()],
+                                "copy_this_to_capture",
+                            ).ok()?;
                         }
                         OperandType::Constant(Value::Int(c)) => {
                             let i_val = i64_type.const_int(*c as u64, true);
@@ -1039,6 +1066,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let arr_ptr = match ops[0] {
                         OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                         OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                        OperandType::This => self_param,
                         _ => get_arg_ptr(&builder, 0).ok()?,
                     };
                     let call_res = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), idx_val.into()], "arr_get_call").ok()?;
@@ -1069,6 +1097,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         let arr_ptr = match ops[0] {
                             OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                             OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                            OperandType::This => self_param,
                             _ => get_arg_ptr(&builder, 0).ok()?,
                         };
                         let _ = builder.build_call(arr_set_int_fn, &[arr_ptr.into(), idx_val.into(), val_to_store.into()], "arr_set_call").ok()?;
@@ -1099,6 +1128,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         let arr_ptr = match ops[0] {
                             OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                             OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                            OperandType::This => self_param,
                             _ => get_arg_ptr(&builder, 0).ok()?,
                         };
                         let call_res = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), word_idx.into()], "arr_get_call").ok()?;
@@ -1143,6 +1173,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         let arr_ptr = match ops[0] {
                             OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                             OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                            OperandType::This => self_param,
                             _ => get_arg_ptr(&builder, 0).ok()?,
                         };
                         let call_res = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), word_idx.into()], "arr_get_call").ok()?;
@@ -1183,6 +1214,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         let arr_ptr = match ops[0] {
                             OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                             OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                            OperandType::This => self_param,
                             _ => get_arg_ptr(&builder, 0).ok()?,
                         };
                         let call_res = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), word_idx.into()], "arr_get_call").ok()?;
@@ -1228,6 +1260,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         let arr_ptr = match ops[0] {
                             OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                             OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                            OperandType::This => self_param,
                             _ => get_arg_ptr(&builder, 0).ok()?,
                         };
                         let call_res = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), word_idx.into()], "arr_get_call").ok()?;
@@ -1262,6 +1295,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         let arr_ptr = match ops[0] {
                             OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                             OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                            OperandType::This => self_param,
                             _ => get_arg_ptr(&builder, 0).ok()?,
                         };
                         let call_res = builder.build_call(arr_get_flt_fn, &[arr_ptr.into(), idx_val.into()], "arr_get_flt_call").ok()?;
@@ -1293,6 +1327,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         let arr_ptr = match ops[0] {
                             OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                             OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                            OperandType::This => self_param,
                             _ => get_arg_ptr(&builder, 0).ok()?,
                         };
                         let _ = builder.build_call(arr_set_flt_fn, &[arr_ptr.into(), idx_val.into(), val_to_store.into()], "arr_set_flt_call").ok()?;
@@ -1341,6 +1376,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         let arr_ptr = match ops[0] {
                             OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                             OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                            OperandType::This => self_param,
                             _ => get_arg_ptr(&builder, 0).ok()?,
                         };
                         let call_res = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), idx_val.into()], "arr_get_call").ok()?;
@@ -1377,6 +1413,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     let obj_ptr = match ops[0] {
                         OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                         OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                        OperandType::This => self_param,
                         _ => get_arg_ptr(&builder, 0).ok()?,
                     };
                     let call_res = builder.build_call(helper_fn, &[obj_ptr.into(), idx_val.into()], "get_prop_call").ok()?;
@@ -1440,51 +1477,37 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                         }
                         OperandType::Register(r) => {
                             if let Ok(reg_ptr) = get_reg_ptr(&builder, *r) {
-                                if let Ok(tag_val) = builder.build_load(i8_type, reg_ptr, "ret_tag") {
-                                    let _ = builder.build_store(out_res_param, tag_val);
-                                }
-                                let payload_offset = i64_type.const_int(8, false);
-                                if let (Ok(reg_payload_ptr), Ok(out_payload_ptr)) = unsafe {
-                                    (builder.build_gep(i8_type, reg_ptr, &[payload_offset], "reg_payload_ptr"),
-                                     builder.build_gep(i8_type, out_res_param, &[payload_offset], "out_payload_ptr"))
-                                } {
-                                    if let Ok(payload_val) = builder.build_load(i64_type, reg_payload_ptr, "ret_payload") {
-                                        let _ = builder.build_store(out_payload_ptr, payload_val);
-                                    }
-                                }
+                                let _ = builder.build_call(
+                                    copy_value_fn,
+                                    &[out_res_param.into(), reg_ptr.into()],
+                                    "copy_register_return",
+                                );
                             }
                         }
                         OperandType::Captured(c) => {
                             if let Ok(cap_ptr) = get_cap_ptr(&builder, *c) {
-                                if let Ok(tag_val) = builder.build_load(i8_type, cap_ptr, "ret_tag") {
-                                    let _ = builder.build_store(out_res_param, tag_val);
-                                }
-                                let payload_offset = i64_type.const_int(8, false);
-                                if let (Ok(cap_payload_ptr), Ok(out_payload_ptr)) = unsafe {
-                                    (builder.build_gep(i8_type, cap_ptr, &[payload_offset], "cap_payload_ptr"),
-                                     builder.build_gep(i8_type, out_res_param, &[payload_offset], "out_payload_ptr"))
-                                } {
-                                    if let Ok(payload_val) = builder.build_load(i64_type, cap_payload_ptr, "ret_payload") {
-                                        let _ = builder.build_store(out_payload_ptr, payload_val);
-                                    }
-                                }
+                                let _ = builder.build_call(
+                                    copy_value_fn,
+                                    &[out_res_param.into(), cap_ptr.into()],
+                                    "copy_capture_return",
+                                );
                             }
                         }
                         OperandType::Argument(a) => {
                             if let Ok(arg_ptr) = get_arg_ptr(&builder, *a) {
-                                if let Ok(tag_val) = builder.build_load(i8_type, arg_ptr, "ret_tag") {
-                                    let _ = builder.build_store(out_res_param, tag_val);
-                                }
-                                let payload_offset = i64_type.const_int(8, false);
-                                if let (Ok(arg_payload_ptr), Ok(out_payload_ptr)) = unsafe {
-                                    (builder.build_gep(i8_type, arg_ptr, &[payload_offset], "arg_payload_ptr"),
-                                     builder.build_gep(i8_type, out_res_param, &[payload_offset], "out_payload_ptr"))
-                                } {
-                                    if let Ok(payload_val) = builder.build_load(i64_type, arg_payload_ptr, "ret_payload") {
-                                        let _ = builder.build_store(out_payload_ptr, payload_val);
-                                    }
-                                }
+                                let _ = builder.build_call(
+                                    copy_value_fn,
+                                    &[out_res_param.into(), arg_ptr.into()],
+                                    "copy_argument_return",
+                                );
                             }
+                        }
+                        OperandType::This => {
+                            let _ = builder.build_call(
+                                copy_value_fn,
+                                &[out_res_param.into(), self_param.into()],
+                                "copy_this_return",
+                            );
                         }
                         _ => {}
                     }
@@ -1500,6 +1523,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                 let obj_ptr = match ops[0] {
                     OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                     OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    OperandType::This => self_param,
                     _ => get_arg_ptr(&builder, 0).ok()?,
                 };
                 let expected_tag = match ops[1] {
@@ -1527,6 +1551,7 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                 let obj_ptr = match ops[0] {
                     OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
                     OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    OperandType::This => self_param,
                     _ => get_arg_ptr(&builder, 0).ok()?,
                 };
                 let table = match &ops[1] {

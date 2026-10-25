@@ -2,13 +2,14 @@
 
 use std::sync::{Arc, RwLock};
 
+use crate::builtin;
 use crate::bytecode::instruction::{Bytecode, OperandType};
 use crate::bytecode::opcode::OPCODE_COUNT;
-use crate::lang::{format_value_with_spec, FunctionType, Object, Protection, Value};
+use crate::lang::{FunctionType, Object, Protection, Value, format_value_with_spec};
+use crate::lang::types::{Function, NativeJitFn};
+use crate::vm::Scheduler;
 use crate::vm::frame::Frame;
 use crate::vm::process::Process;
-use crate::vm::Scheduler;
-use crate::builtin;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ExecutionResult {
@@ -22,6 +23,39 @@ pub struct ExecutionContext<'a> {
     pub bytecode: &'a Bytecode,
     pub process: &'a mut Process,
     pub scheduler: &'a Scheduler,
+}
+
+/// Invoke compiled code with a mutable pointer to the bound receiver, if one exists.
+/// The write guard intentionally remains alive for the duration of the JIT call so the
+/// pointer into `Function::bound_this` stays valid and mutations persist.
+#[inline]
+unsafe fn call_native_jit_with_self(
+    native_fn: NativeJitFn,
+    registers: *mut Value,
+    bound_function: Option<&Arc<RwLock<Function>>>,
+    fallback_bound_function: Option<&Arc<RwLock<Function>>>,
+    args: *const Value,
+    env: *mut Value,
+    out_res: *mut Value,
+) {
+    if let Some(bound_function) = bound_function {
+        let mut function = bound_function.write().unwrap();
+        if let Some(receiver) = function.bound_this.as_mut() {
+            unsafe { native_fn(registers, receiver as *mut Value, args, env, out_res) };
+            return;
+        }
+    }
+
+    if let Some(bound_function) = fallback_bound_function {
+        let mut function = bound_function.write().unwrap();
+        if let Some(receiver) = function.bound_this.as_mut() {
+            unsafe { native_fn(registers, receiver as *mut Value, args, env, out_res) };
+            return;
+        }
+    }
+
+    let mut nil_self = Value::Nil;
+    unsafe { native_fn(registers, &mut nil_self, args, env, out_res) };
 }
 
 pub type HandlerFn = for<'a> fn(&'a mut ExecutionContext<'a>) -> ExecutionResult;
@@ -46,14 +80,17 @@ pub fn resolve_operand(bytecode: &Bytecode, proc: &Process, op: &OperandType) ->
                 Value::Nil
             }
         }
-        OperandType::Captured(i) => {
-            frame.closure_env
-                .as_ref()
-                .and_then(|env| env.read().unwrap().get(*i).cloned())
-                .unwrap_or(Value::Nil)
-        }
+        OperandType::Captured(i) => frame
+            .closure_env
+            .as_ref()
+            .and_then(|env| env.read().unwrap().get(*i).cloned())
+            .unwrap_or(Value::Nil),
         OperandType::Property(proto_name) => {
-            if let Some((_, proto)) = bytecode.object_inits.iter().find(|(name, _)| name == proto_name) {
+            if let Some((_, proto)) = bytecode
+                .object_inits
+                .iter()
+                .find(|(name, _)| name == proto_name)
+            {
                 Value::Object(Arc::clone(proto))
             } else {
                 Value::Nil
@@ -68,6 +105,7 @@ pub fn set_reg_value_in_frame(frame: &mut Frame, reg_idx: usize, val: Value) {
     if reg_idx >= frame.registers.len() {
         frame.registers.resize(reg_idx + 1, Value::Nil);
     }
+
     frame.registers[reg_idx] = val;
 }
 
@@ -202,7 +240,11 @@ fn op_div<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let r = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
     let res = match (&l, &r) {
         (Value::Int(a), Value::Int(b)) => {
-            if *b != 0 { Value::Int(a / b) } else { Value::Nil }
+            if *b != 0 {
+                Value::Int(a / b)
+            } else {
+                Value::Nil
+            }
         }
         (Value::Float(a), Value::Float(b)) => Value::Float(a / b),
         (Value::Int(a), Value::Float(b)) => Value::Float(*a as f64 / b),
@@ -224,7 +266,11 @@ fn op_rem<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let r = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
     let res = match (&l, &r) {
         (Value::Int(a), Value::Int(b)) => {
-            if *b != 0 { Value::Int(a % b) } else { Value::Nil }
+            if *b != 0 {
+                Value::Int(a % b)
+            } else {
+                Value::Nil
+            }
         }
         _ => builtin::arithmetic::rem(&l, &r).unwrap_or(Value::Nil),
     };
@@ -332,6 +378,7 @@ fn op_jump_false<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_call<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let caller_bound_function = frame.bound_function.clone();
 
     if let OperandType::Function(ref name) = inst.operands[0] {
         if let Some(&target_idx) = ctx.scheduler.function_indices.get(name) {
@@ -345,9 +392,8 @@ fn op_call<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
                     OperandType::Register(r) => r,
                     _ => 0,
                 };
-                let mut stack_args: [std::mem::MaybeUninit<Value>; 16] = unsafe {
-                    std::mem::MaybeUninit::uninit().assume_init()
-                };
+                let mut stack_args: [std::mem::MaybeUninit<Value>; 16] =
+                    unsafe { std::mem::MaybeUninit::uninit().assume_init() };
                 for i in 0..arg_count {
                     let val = match &inst.operands[2 + i] {
                         OperandType::Register(r) => {
@@ -371,12 +417,21 @@ fn op_call<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
                 }
                 let mut stack_regs = [const { Value::Nil }; 64];
                 let mut out_res = Value::Nil;
-                let env_ptr = target_func.closure_env
+                let env_ptr = target_func
+                    .closure_env
                     .as_ref()
                     .map(|e| e.write().unwrap().as_mut_ptr())
                     .unwrap_or(std::ptr::null_mut());
                 unsafe {
-                    native_fn(stack_regs.as_mut_ptr(), stack_args.as_ptr() as *const Value, env_ptr, &mut out_res);
+                    call_native_jit_with_self(
+                        native_fn,
+                        stack_regs.as_mut_ptr(),
+                        caller_bound_function.as_ref(),
+                        None,
+                        stack_args.as_ptr() as *const Value,
+                        env_ptr,
+                        &mut out_res,
+                    );
                 }
                 std::mem::forget(stack_args);
                 std::mem::forget(stack_regs);
@@ -399,7 +454,11 @@ fn op_call<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let dst = inst.operands[2 + arg_count].clone();
         let mut args = Vec::with_capacity(arg_count);
         for i in 0..arg_count {
-            args.push(resolve_operand(ctx.bytecode, ctx.process, &inst.operands[2 + i]));
+            args.push(resolve_operand(
+                ctx.bytecode,
+                ctx.process,
+                &inst.operands[2 + i],
+            ));
         }
         (callee_val, arg_count, dst, args)
     };
@@ -408,23 +467,44 @@ fn op_call<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         Value::Function(f) => {
             let (fn_name, reg_count, fn_type, closure_env, bound_this) = {
                 let f_lock = f.read().unwrap();
-                (f_lock.name.clone(), f_lock.register_count, f_lock.fn_type.clone(), f_lock.closure_env.clone(), f_lock.bound_this.clone())
+                (
+                    f_lock.name.clone(),
+                    f_lock.register_count,
+                    f_lock.fn_type.clone(),
+                    f_lock.closure_env.clone(),
+                    f_lock.bound_this.clone(),
+                )
             };
             match fn_type {
                 FunctionType::Regular | FunctionType::Closure => {
-                    let target_idx = ctx.bytecode.functions.iter().position(|func| func.name == fn_name)
+                    let target_idx = ctx
+                        .bytecode
+                        .functions
+                        .iter()
+                        .position(|func| func.name == fn_name)
                         .unwrap_or(0);
                     let target_func = &ctx.bytecode.functions[target_idx];
                     if let Some(native_fn) = target_func.jit_compiled_fn {
                         let mut out_res = Value::Nil;
-                        let mut regs = std::mem::ManuallyDrop::new(vec![Value::Nil; target_func.register_count]);
+                        let mut regs = std::mem::ManuallyDrop::new(vec![
+                            Value::Nil;
+                            target_func.register_count
+                        ]);
                         let env_ptr = closure_env
                             .as_ref()
                             .or(target_func.closure_env.as_ref())
                             .map(|e| e.write().unwrap().as_mut_ptr())
                             .unwrap_or(std::ptr::null_mut());
                         unsafe {
-                            native_fn(regs.as_mut_ptr(), args.as_ptr(), env_ptr, &mut out_res);
+                            call_native_jit_with_self(
+                                native_fn,
+                                regs.as_mut_ptr(),
+                                Some(&f),
+                                caller_bound_function.as_ref(),
+                                args.as_ptr(),
+                                env_ptr,
+                                &mut out_res,
+                            );
                         }
                         save_value_to_operand(ctx.process, &dst_op, out_res);
                         ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -441,9 +521,19 @@ fn op_call<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
                         let mut call_args = Vec::with_capacity(1 + args.len());
                         call_args.push(this_val.clone());
                         call_args.extend(args);
-                        builtin::call_native(&fn_name, &call_args).unwrap_or(Value::Nil)
+                        builtin::call_native_with_bytecode(
+                            &fn_name,
+                            &call_args,
+                            Some(ctx.bytecode),
+                        )
+                        .unwrap_or(Value::Nil)
                     } else {
-                        builtin::call_native(&fn_name, &args).unwrap_or(Value::Nil)
+                        builtin::call_native_with_bytecode(
+                            &fn_name,
+                            &args,
+                            Some(ctx.bytecode),
+                        )
+                        .unwrap_or(Value::Nil)
                     };
                     save_value_to_operand(ctx.process, &dst_op, res);
                     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -459,27 +549,42 @@ fn op_call<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
             let frame = ctx.process.frame_stack.last().unwrap();
             let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
             if let OperandType::Function(name) = &inst.operands[0] {
-                if let Some(res) = builtin::call_native(name, &args) {
+                if let Some(res) =
+                    builtin::call_native_with_bytecode(name, &args, Some(ctx.bytecode))
+                {
                     save_value_to_operand(ctx.process, &dst_op, res);
                     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
                     become fetch_and_dispatch(ctx);
-                } else if let Some(target_idx) = ctx.bytecode.functions.iter().position(|f| f.name == *name) {
+                } else if let Some(target_idx) =
+                    ctx.bytecode.functions.iter().position(|f| f.name == *name)
+                {
                     let target_func = &ctx.bytecode.functions[target_idx];
                     if let Some(native_fn) = target_func.jit_compiled_fn {
                         let mut out_res = Value::Nil;
                         let mut regs = vec![Value::Nil; target_func.register_count];
-                        let env_ptr = target_func.closure_env
+                        let env_ptr = target_func
+                            .closure_env
                             .as_ref()
                             .map(|e| e.write().unwrap().as_mut_ptr())
                             .unwrap_or(std::ptr::null_mut());
+                        let caller_bound_function = frame.bound_function.clone();
                         unsafe {
-                            native_fn(regs.as_mut_ptr(), args.as_ptr(), env_ptr, &mut out_res);
+                            call_native_jit_with_self(
+                                native_fn,
+                                regs.as_mut_ptr(),
+                                caller_bound_function.as_ref(),
+                                None,
+                                args.as_ptr(),
+                                env_ptr,
+                                &mut out_res,
+                            );
                         }
                         save_value_to_operand(ctx.process, &dst_op, out_res);
                         ctx.process.frame_stack.last_mut().unwrap().pc += 1;
                         become fetch_and_dispatch(ctx);
                     }
-                    let new_frame = Frame::new(target_idx, target_func.register_count, args, dst_op);
+                    let new_frame =
+                        Frame::new(target_idx, target_func.register_count, args, dst_op);
                     ctx.process.frame_stack.push(new_frame);
                     become fetch_and_dispatch(ctx);
                 } else {
@@ -794,25 +899,23 @@ fn op_get_index<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     };
 
     let val = match obj {
-        Value::Array(arr) => {
-            arr.read().unwrap().get(idx_val).cloned().unwrap_or(Value::Nil)
-        }
-        Value::IntArray(arr) => {
-            arr.read().unwrap().get(idx_val).copied().map(Value::Int).unwrap_or(Value::Nil)
-        }
-        Value::FloatArray(arr) => {
-            arr.read().unwrap().get(idx_val).copied().map(Value::Float).unwrap_or(Value::Nil)
-        }
+        Value::Array(arr) => arr.read().unwrap().get(idx_val).cloned().unwrap_or(Value::Nil),
+        Value::IntArray(arr) => arr.read().unwrap().get(idx_val).copied().map(Value::Int).unwrap_or(Value::Nil),
+        Value::FloatArray(arr) => arr.read().unwrap().get(idx_val).copied().map(Value::Float).unwrap_or(Value::Nil),
         Value::Object(obj) => {
             let borrowed = obj.read().unwrap();
             if idx_val < borrowed.indexed.len() {
                 if let Some(Some(prop)) = borrowed.indexed.get(idx_val) {
                     prop.value.clone()
                 } else {
-                    borrowed.get_property(&idx_val.to_string()).unwrap_or(Value::Nil)
+                    borrowed
+                        .get_property(&idx_val.to_string())
+                        .unwrap_or(Value::Nil)
                 }
             } else {
-                borrowed.get_property(&idx_val.to_string()).unwrap_or(Value::Nil)
+                borrowed
+                    .get_property(&idx_val.to_string())
+                    .unwrap_or(Value::Nil)
             }
         }
         _ => Value::Nil,
@@ -839,7 +942,11 @@ fn op_new_object<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     };
 
     let obj = Object::new(proto);
-    save_value_to_operand(ctx.process, &dst_op, Value::Object(Arc::new(RwLock::new(obj))));
+    save_value_to_operand(
+        ctx.process,
+        &dst_op,
+        Value::Object(Arc::new(RwLock::new(obj))),
+    );
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -849,12 +956,18 @@ fn op_make_closure<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let frame = ctx.process.frame_stack.last().unwrap();
         let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
         if inst.operands.len() < 2 {
-            return ExecutionResult::Error("make_closure requires at least func and dst operands".to_string());
+            return ExecutionResult::Error(
+                "make_closure requires at least func and dst operands".to_string(),
+            );
         }
         let (func_op, env_op, dst_op) = if inst.operands.len() == 2 {
             (&inst.operands[0], None, &inst.operands[1])
         } else {
-            (&inst.operands[0], Some(&inst.operands[1]), &inst.operands[2])
+            (
+                &inst.operands[0],
+                Some(&inst.operands[1]),
+                &inst.operands[2],
+            )
         };
 
         let env_arc = env_op.and_then(|op| {
@@ -866,15 +979,16 @@ fn op_make_closure<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         });
 
         let func = match func_op {
-            OperandType::Function(name) => {
-                ctx.bytecode.functions.iter().find(|f| f.name == *name).cloned()
-            }
-            OperandType::Register(r) => {
-                match frame.registers.get(*r) {
-                    Some(Value::Function(f)) => Some(f.read().unwrap().clone()),
-                    _ => None,
-                }
-            }
+            OperandType::Function(name) => ctx
+                .bytecode
+                .functions
+                .iter()
+                .find(|f| f.name == *name)
+                .cloned(),
+            OperandType::Register(r) => match frame.registers.get(*r) {
+                Some(Value::Function(f)) => Some(f.read().unwrap().clone()),
+                _ => None,
+            },
             _ => None,
         };
 
@@ -885,7 +999,11 @@ fn op_make_closure<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         Some(mut f) => {
             f.fn_type = FunctionType::Closure;
             f.closure_env = env_opt;
-            save_value_to_operand(ctx.process, &dst_op, Value::Function(Arc::new(RwLock::new(f))));
+            save_value_to_operand(
+                ctx.process,
+                &dst_op,
+                Value::Function(Arc::new(RwLock::new(f))),
+            );
         }
         None => {
             return ExecutionResult::Error("function not found for make_closure".to_string());
@@ -953,7 +1071,11 @@ fn op_spawn<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         };
         let mut args = Vec::with_capacity(arg_count);
         for i in 0..arg_count {
-            args.push(resolve_operand(ctx.bytecode, ctx.process, &inst.operands[2 + i]));
+            args.push(resolve_operand(
+                ctx.bytecode,
+                ctx.process,
+                &inst.operands[2 + i],
+            ));
         }
         (fn_name, arg_count, dst, args)
     };
@@ -971,7 +1093,9 @@ fn op_spawn<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_swap<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    if let (OperandType::Register(r1), OperandType::Register(r2)) = (&inst.operands[0], &inst.operands[1]) {
+    if let (OperandType::Register(r1), OperandType::Register(r2)) =
+        (&inst.operands[0], &inst.operands[1])
+    {
         if *r1 < frame.registers.len() && *r2 < frame.registers.len() {
             frame.registers.swap(*r1, *r2);
         }
@@ -988,11 +1112,26 @@ fn op_nop<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_add_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l + r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1001,11 +1140,26 @@ fn op_I_add_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_sub_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l - r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1014,11 +1168,26 @@ fn op_I_sub_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_mul_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l * r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1027,10 +1196,22 @@ fn op_I_mul_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_div_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 1 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 1,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(if c != 0 { l / c } else { 0 }));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1039,10 +1220,22 @@ fn op_I_div_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_rem_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 1 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 1,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(if c != 0 { l % c } else { 0 }));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1051,11 +1244,26 @@ fn op_I_rem_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_eq_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(l == r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1064,11 +1272,26 @@ fn op_I_eq_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_lt_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(l < r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1077,11 +1300,26 @@ fn op_I_lt_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_gt_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(l > r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1090,10 +1328,22 @@ fn op_I_gt_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_gt_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(l > c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1102,11 +1352,26 @@ fn op_I_gt_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_add_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(l + r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1115,11 +1380,26 @@ fn op_F_add_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_sub_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(l - r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1128,11 +1408,26 @@ fn op_F_sub_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_mul_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(l * r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1141,11 +1436,26 @@ fn op_F_mul_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_div_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 1.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 1.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(if r != 0.0 { l / r } else { 0.0 }));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1154,11 +1464,26 @@ fn op_F_div_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_eq_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(l == r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1167,11 +1492,26 @@ fn op_F_eq_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_lt_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(l < r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1180,11 +1520,26 @@ fn op_F_lt_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_gt_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(l > r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -1193,9 +1548,19 @@ fn op_F_gt_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_jump_true_R<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let off = match inst.operands[1] { OperandType::Offset(o) => o, _ => 1 };
-    let val = match frame.registers.get(r0) { Some(Value::Int(i)) => *i != 0, Some(Value::Bool(b)) => *b, _ => false };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let off = match inst.operands[1] {
+        OperandType::Offset(o) => o,
+        _ => 1,
+    };
+    let val = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i != 0,
+        Some(Value::Bool(b)) => *b,
+        _ => false,
+    };
     if val {
         let pc = frame.pc as i64 + off;
         frame.pc = pc as usize;
@@ -1211,9 +1576,19 @@ fn op_I_jump_true_R<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_jump_false_R<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let off = match inst.operands[1] { OperandType::Offset(o) => o, _ => 1 };
-    let val = match frame.registers.get(r0) { Some(Value::Int(i)) => *i == 0, Some(Value::Bool(b)) => !*b, _ => true };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let off = match inst.operands[1] {
+        OperandType::Offset(o) => o,
+        _ => 1,
+    };
+    let val = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i == 0,
+        Some(Value::Bool(b)) => !*b,
+        _ => true,
+    };
     if val {
         let pc = frame.pc as i64 + off;
         frame.pc = pc as usize;
@@ -1229,10 +1604,22 @@ fn op_I_jump_false_R<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_A_get_index_AR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let arg_idx = match inst.operands[0] { OperandType::Argument(a) => a, _ => 0 };
-    let reg_idx = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst_reg = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let idx_val = match frame.registers.get(reg_idx) { Some(Value::Int(i)) => *i as usize, _ => 0 };
+    let arg_idx = match inst.operands[0] {
+        OperandType::Argument(a) => a,
+        _ => 0,
+    };
+    let reg_idx = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst_reg = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let idx_val = match frame.registers.get(reg_idx) {
+        Some(Value::Int(i)) => *i as usize,
+        _ => 0,
+    };
     let val = if arg_idx < 8 {
         if let Some(cached_ints) = &frame.cached_int_arrays[arg_idx] {
             if idx_val < cached_ints.len() {
@@ -1242,7 +1629,10 @@ fn op_A_get_index_AR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
             }
         } else if let Some(cached) = &frame.cached_indexed_items[arg_idx] {
             if idx_val < cached.len() {
-                cached[idx_val].as_ref().map(|p| p.value.clone()).unwrap_or(Value::Nil)
+                cached[idx_val]
+                    .as_ref()
+                    .map(|property| property.value.clone())
+                    .unwrap_or(Value::Nil)
             } else {
                 Value::Nil
             }
@@ -1261,13 +1651,25 @@ fn op_I_gt_jmp_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
     let l = match inst.operands[0] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
-        OperandType::Argument(a) => match frame.arguments.get(a) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
+        OperandType::Argument(a) => match frame.arguments.get(a) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let r = match inst.operands[1] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
-        OperandType::Argument(a) => match frame.arguments.get(a) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
+        OperandType::Argument(a) => match frame.arguments.get(a) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let off = match inst.operands[2] {
@@ -1290,8 +1692,14 @@ fn op_I_gt_jmp_RC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
     let l = match inst.operands[0] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
-        OperandType::Argument(a) => match frame.arguments.get(a) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
+        OperandType::Argument(a) => match frame.arguments.get(a) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let c = match inst.operands[1] {
@@ -1318,13 +1726,25 @@ fn op_I_lt_jmp_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
     let l = match inst.operands[0] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
-        OperandType::Argument(a) => match frame.arguments.get(a) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
+        OperandType::Argument(a) => match frame.arguments.get(a) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let r = match inst.operands[1] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
-        OperandType::Argument(a) => match frame.arguments.get(a) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
+        OperandType::Argument(a) => match frame.arguments.get(a) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let off = match inst.operands[2] {
@@ -1347,8 +1767,14 @@ fn op_I_lt_jmp_RC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
     let l = match inst.operands[0] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
-        OperandType::Argument(a) => match frame.arguments.get(a) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
+        OperandType::Argument(a) => match frame.arguments.get(a) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let c = match inst.operands[1] {
@@ -1375,11 +1801,17 @@ fn op_I_eq_jmp_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
     let l = match inst.operands[0] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let r = match inst.operands[1] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let off = match inst.operands[2] {
@@ -1402,7 +1834,10 @@ fn op_I_eq_jmp_RC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
     let l = match inst.operands[0] {
-        OperandType::Register(r) => match frame.registers.get(r) { Some(Value::Int(i)) => *i, _ => 0 },
+        OperandType::Register(r) => match frame.registers.get(r) {
+            Some(Value::Int(i)) => *i,
+            _ => 0,
+        },
         _ => 0,
     };
     let c = match inst.operands[1] {
@@ -1428,11 +1863,26 @@ fn op_I_eq_jmp_RC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_gt_jmp_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let off = match inst.operands[2] { OperandType::Offset(o) => o, _ => 1 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let off = match inst.operands[2] {
+        OperandType::Offset(o) => o,
+        _ => 1,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     if l > r {
         let pc = frame.pc as i64 + off;
         frame.pc = pc as usize;
@@ -1448,11 +1898,26 @@ fn op_F_gt_jmp_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_lt_jmp_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let off = match inst.operands[2] { OperandType::Offset(o) => o, _ => 1 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
-    let r = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let off = match inst.operands[2] {
+        OperandType::Offset(o) => o,
+        _ => 1,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     if l < r {
         let pc = frame.pc as i64 + off;
         frame.pc = pc as usize;
@@ -1468,10 +1933,22 @@ fn op_F_lt_jmp_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_gt_jmp_RC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let off = match inst.operands[2] { OperandType::Offset(o) => o, _ => 1 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let off = match inst.operands[2] {
+        OperandType::Offset(o) => o,
+        _ => 1,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     if l > c {
         let pc = frame.pc as i64 + off;
         frame.pc = pc as usize;
@@ -1487,10 +1964,22 @@ fn op_F_gt_jmp_RC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_lt_jmp_RC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let off = match inst.operands[2] { OperandType::Offset(o) => o, _ => 1 };
-    let l = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let off = match inst.operands[2] {
+        OperandType::Offset(o) => o,
+        _ => 1,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     if l < c {
         let pc = frame.pc as i64 + off;
         frame.pc = pc as usize;
@@ -1604,7 +2093,9 @@ fn op_S_find_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 
     let idx = match (&v1, &v2) {
         (Value::String(haystack), Value::String(needle)) => {
-            crate::vm::simd::simd_str_find(haystack, needle).map(|i| i as i64).unwrap_or(-1)
+            crate::vm::simd::simd_str_find(haystack, needle)
+                .map(|i| i as i64)
+                .unwrap_or(-1)
         }
         _ => -1,
     };
@@ -1631,6 +2122,64 @@ fn op_S_to_int_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 }
 
 fn op_E_make_enum<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
+    if ctx.process.frame_stack.last().is_some_and(|frame| {
+        ctx.bytecode.functions[frame.function_index].instructions[frame.pc]
+            .operands
+            .len()
+            == 4
+    }) {
+        let (enum_name, variant_name, payload_regs, dst_op) = {
+            let frame = ctx.process.frame_stack.last().unwrap();
+            let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+            let read_string = |operand: &OperandType| match operand {
+                OperandType::Constant(Value::String(value)) => value.clone(),
+                _ => String::new(),
+            };
+            let enum_name = read_string(&inst.operands[0]);
+            let variant_name = read_string(&inst.operands[1]);
+            let payload_regs = match &inst.operands[2] {
+                OperandType::RegisterList(regs) => regs.clone(),
+                _ => vec![],
+            };
+            (
+                enum_name,
+                variant_name,
+                payload_regs,
+                inst.operands[3].clone(),
+            )
+        };
+        let prototype = ctx
+            .bytecode
+            .object_inits
+            .iter()
+            .find(|(name, _)| name == &enum_name)
+            .map(|(_, prototype)| Arc::clone(prototype));
+        let mut obj = Object::new(prototype);
+        obj.set_property("@", Value::String(enum_name), Protection::Readonly);
+        obj.set_property("@@", Value::String(variant_name), Protection::Readonly);
+        for (index, register) in payload_regs.iter().enumerate() {
+            let frame = ctx.process.frame_stack.last().unwrap();
+            let value = frame
+                .registers
+                .get(*register)
+                .cloned()
+                .unwrap_or(Value::Nil);
+            obj.set_property(
+                &format!("@payload_{}", index),
+                value.clone(),
+                Protection::Writeable,
+            );
+            obj.set_property(&index.to_string(), value, Protection::Writeable);
+        }
+        save_value_to_operand(
+            ctx.process,
+            &dst_op,
+            Value::Object(Arc::new(RwLock::new(obj))),
+        );
+        ctx.process.frame_stack.last_mut().unwrap().pc += 1;
+        become fetch_and_dispatch(ctx);
+    }
+
     let (tag_val, pos_regs, prop_names, named_regs, dst_op) = {
         let frame = ctx.process.frame_stack.last().unwrap();
         let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
@@ -1660,7 +2209,11 @@ fn op_E_make_enum<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     for (i, reg) in pos_regs.iter().enumerate() {
         let frame = ctx.process.frame_stack.last().unwrap();
         let val = frame.registers.get(*reg).cloned().unwrap_or(Value::Nil);
-        obj.set_property(&format!("@payload_{}", i), val.clone(), Protection::Writeable);
+        obj.set_property(
+            &format!("@payload_{}", i),
+            val.clone(),
+            Protection::Writeable,
+        );
         obj.set_property(&i.to_string(), val, Protection::Writeable);
     }
 
@@ -1670,7 +2223,11 @@ fn op_E_make_enum<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         obj.set_property(name, val, Protection::Writeable);
     }
 
-    save_value_to_operand(ctx.process, &dst_op, Value::Object(Arc::new(RwLock::new(obj))));
+    save_value_to_operand(
+        ctx.process,
+        &dst_op,
+        Value::Object(Arc::new(RwLock::new(obj))),
+    );
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -1684,7 +2241,11 @@ fn op_E_get_tag_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     };
 
     let tag = match enum_val {
-        Value::Object(obj) => obj.read().unwrap().get_property("@tag").unwrap_or(Value::Int(-1)),
+        Value::Object(obj) => obj
+            .read()
+            .unwrap()
+            .get_property("@tag")
+            .unwrap_or(Value::Int(-1)),
         _ => Value::Int(-1),
     };
     save_value_to_operand(ctx.process, &dst_op, tag);
@@ -1708,7 +2269,10 @@ fn op_E_get_payload_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult
     let payload = match enum_val {
         Value::Object(obj) => {
             let borrowed = obj.read().unwrap();
-            borrowed.get_property(&key).or_else(|| borrowed.get_property(key.trim_start_matches("@payload_"))).unwrap_or(Value::Nil)
+            borrowed
+                .get_property(&key)
+                .or_else(|| borrowed.get_property(key.trim_start_matches("@payload_")))
+                .unwrap_or(Value::Nil)
         }
         _ => Value::Nil,
     };
@@ -1739,7 +2303,10 @@ fn op_E_get_payload_RR_multi<'a>(ctx: &'a mut ExecutionContext<'a>) -> Execution
             let payload = match key_op {
                 OperandType::Constant(Value::Int(i)) => {
                     let key = format!("@payload_{}", i);
-                    borrowed.get_property(&key).or_else(|| borrowed.get_property(&i.to_string())).unwrap_or(Value::Nil)
+                    borrowed
+                        .get_property(&key)
+                        .or_else(|| borrowed.get_property(&i.to_string()))
+                        .unwrap_or(Value::Nil)
                 }
                 OperandType::Property(p) => borrowed.get_property(p).unwrap_or(Value::Nil),
                 _ => Value::Nil,
@@ -1891,7 +2458,11 @@ fn op_new_array<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         }
     };
     let arr = vec![Value::Nil; len];
-    save_value_to_operand(ctx.process, &dst_op, Value::Array(Arc::new(RwLock::new(arr))));
+    save_value_to_operand(
+        ctx.process,
+        &dst_op,
+        Value::Array(Arc::new(RwLock::new(arr))),
+    );
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -1913,7 +2484,11 @@ fn op_new_int_array<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         }
     };
     let arr = vec![0i64; len];
-    save_value_to_operand(ctx.process, &dst_op, Value::IntArray(Arc::new(RwLock::new(arr))));
+    save_value_to_operand(
+        ctx.process,
+        &dst_op,
+        Value::IntArray(Arc::new(RwLock::new(arr))),
+    );
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -1935,7 +2510,11 @@ fn op_new_float_array<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult 
         }
     };
     let arr = vec![0.0f64; len];
-    save_value_to_operand(ctx.process, &dst_op, Value::FloatArray(Arc::new(RwLock::new(arr))));
+    save_value_to_operand(
+        ctx.process,
+        &dst_op,
+        Value::FloatArray(Arc::new(RwLock::new(arr))),
+    );
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -2258,7 +2837,9 @@ fn op_V_add_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::FloatArray(Arc::new(RwLock::new(crate::vm::simd::simd_vadd_f(&ba, &bb))))
+            Value::FloatArray(Arc::new(RwLock::new(crate::vm::simd::simd_vadd_f(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2279,7 +2860,9 @@ fn op_V_sub_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::FloatArray(Arc::new(RwLock::new(crate::vm::simd::simd_vsub_f(&ba, &bb))))
+            Value::FloatArray(Arc::new(RwLock::new(crate::vm::simd::simd_vsub_f(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2300,7 +2883,9 @@ fn op_V_mul_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::FloatArray(Arc::new(RwLock::new(crate::vm::simd::simd_vmul_f(&ba, &bb))))
+            Value::FloatArray(Arc::new(RwLock::new(crate::vm::simd::simd_vmul_f(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2342,7 +2927,9 @@ fn op_V_add_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vadd_i(&ba, &bb))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vadd_i(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2363,7 +2950,9 @@ fn op_V_sub_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vsub_i(&ba, &bb))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vsub_i(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2384,7 +2973,9 @@ fn op_V_mul_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vmul_i(&ba, &bb))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vmul_i(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2496,7 +3087,9 @@ fn op_S_count_byte_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult
         (s, b, inst.operands[2].clone())
     };
     let count = match (v_str, v_byte) {
-        (Value::String(s), Value::Int(b)) => crate::vm::simd::simd_str_count_byte(&s, b as u8) as i64,
+        (Value::String(s), Value::Int(b)) => {
+            crate::vm::simd::simd_str_count_byte(&s, b as u8) as i64
+        }
         (Value::String(s), Value::String(needle)) if !needle.is_empty() => {
             crate::vm::simd::simd_str_count_byte(&s, needle.as_bytes()[0]) as i64
         }
@@ -2538,10 +3131,22 @@ fn op_I_add_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_sub_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(v0 - c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2550,10 +3155,22 @@ fn op_I_sub_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_sub_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(c - v1));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2562,10 +3179,22 @@ fn op_I_sub_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_mul_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(v0 * c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2574,10 +3203,22 @@ fn op_I_mul_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_div_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(if v1 != 0 { c / v1 } else { 0 }));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2586,10 +3227,22 @@ fn op_I_div_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_rem_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(if v1 != 0 { c % v1 } else { 0 }));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2598,10 +3251,22 @@ fn op_I_rem_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_eq_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(v0 == c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2610,10 +3275,22 @@ fn op_I_eq_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_lt_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(v0 < c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2622,10 +3299,22 @@ fn op_I_lt_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_lt_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(c < v1));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2634,10 +3323,22 @@ fn op_I_lt_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_gt_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(c > v1));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2646,10 +3347,22 @@ fn op_I_gt_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_add_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(v0 + c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2658,10 +3371,22 @@ fn op_F_add_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_sub_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(v0 - c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2670,10 +3395,22 @@ fn op_F_sub_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_sub_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(c - v1));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2682,10 +3419,22 @@ fn op_F_sub_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_mul_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(v0 * c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2694,10 +3443,22 @@ fn op_F_mul_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_div_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 1.0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 1.0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(v0 / c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2706,10 +3467,22 @@ fn op_F_div_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_div_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 1.0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 1.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Float(c / v1));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2718,10 +3491,22 @@ fn op_F_div_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_eq_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(v0 == c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2730,10 +3515,22 @@ fn op_F_eq_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_lt_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(v0 < c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2742,10 +3539,22 @@ fn op_F_lt_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_gt_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v0 = match frame.registers.get(r0) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v0 = match frame.registers.get(r0) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(v0 > c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2754,10 +3563,22 @@ fn op_F_gt_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_lt_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(c < v1));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2766,10 +3587,22 @@ fn op_F_lt_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_F_gt_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let c = match inst.operands[0] { OperandType::Constant(Value::Float(f)) => f, _ => 0.0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let v1 = match frame.registers.get(r1) { Some(Value::Float(f)) => *f, _ => 0.0 };
+    let c = match inst.operands[0] {
+        OperandType::Constant(Value::Float(f)) => f,
+        _ => 0.0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let v1 = match frame.registers.get(r1) {
+        Some(Value::Float(f)) => *f,
+        _ => 0.0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Bool(c > v1));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -2778,6 +3611,7 @@ fn op_F_gt_CRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_call_jit<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let caller_bound_function = frame.bound_function.clone();
     let target_idx = match inst.operands[0] {
         OperandType::Offset(o) => o as usize,
         _ => 0,
@@ -2794,9 +3628,8 @@ fn op_call_jit<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let target_func = &ctx.bytecode.functions[target_idx];
     let native_fn = target_func.jit_compiled_fn.unwrap();
 
-    let mut stack_args: [std::mem::MaybeUninit<Value>; 16] = unsafe {
-        std::mem::MaybeUninit::uninit().assume_init()
-    };
+    let mut stack_args: [std::mem::MaybeUninit<Value>; 16] =
+        unsafe { std::mem::MaybeUninit::uninit().assume_init() };
     for i in 0..arg_count {
         let val = match &inst.operands[2 + i] {
             OperandType::Register(r) => {
@@ -2821,12 +3654,21 @@ fn op_call_jit<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 
     let mut stack_regs = [const { Value::Nil }; 64];
     let mut out_res = Value::Nil;
-    let env_ptr = target_func.closure_env
+    let env_ptr = target_func
+        .closure_env
         .as_ref()
         .map(|e| e.write().unwrap().as_mut_ptr())
         .unwrap_or(std::ptr::null_mut());
     unsafe {
-        native_fn(stack_regs.as_mut_ptr(), stack_args.as_ptr() as *const Value, env_ptr, &mut out_res);
+        call_native_jit_with_self(
+            native_fn,
+            stack_regs.as_mut_ptr(),
+            caller_bound_function.as_ref(),
+            None,
+            stack_args.as_ptr() as *const Value,
+            env_ptr,
+            &mut out_res,
+        );
     }
     std::mem::forget(stack_args);
     std::mem::forget(stack_regs);
@@ -2868,10 +3710,20 @@ fn op_V_iota_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let c = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
         (s, c, inst.operands[2].clone())
     };
-    let s_int = match start_val { Value::Int(i) => i, _ => 0 };
-    let c_int = match count_val { Value::Int(i) => i.max(0) as usize, _ => 0 };
+    let s_int = match start_val {
+        Value::Int(i) => i,
+        _ => 0,
+    };
+    let c_int = match count_val {
+        Value::Int(i) => i.max(0) as usize,
+        _ => 0,
+    };
     let vec = crate::vm::simd::simd_viota_i(s_int, c_int);
-    save_value_to_operand(ctx.process, &dst_op, Value::IntArray(Arc::new(RwLock::new(vec))));
+    save_value_to_operand(
+        ctx.process,
+        &dst_op,
+        Value::IntArray(Arc::new(RwLock::new(vec))),
+    );
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -2884,10 +3736,20 @@ fn op_V_splat_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let c = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
         (v, c, inst.operands[2].clone())
     };
-    let v_int = match val { Value::Int(i) => i, _ => 0 };
-    let c_int = match count_val { Value::Int(i) => i.max(0) as usize, _ => 0 };
+    let v_int = match val {
+        Value::Int(i) => i,
+        _ => 0,
+    };
+    let c_int = match count_val {
+        Value::Int(i) => i.max(0) as usize,
+        _ => 0,
+    };
     let vec = crate::vm::simd::simd_vsplat_i(v_int, c_int);
-    save_value_to_operand(ctx.process, &dst_op, Value::IntArray(Arc::new(RwLock::new(vec))));
+    save_value_to_operand(
+        ctx.process,
+        &dst_op,
+        Value::IntArray(Arc::new(RwLock::new(vec))),
+    );
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -2900,10 +3762,21 @@ fn op_V_splat_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let c = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
         (v, c, inst.operands[2].clone())
     };
-    let v_float = match val { Value::Float(f) => f, Value::Int(i) => i as f64, _ => 0.0 };
-    let c_int = match count_val { Value::Int(i) => i.max(0) as usize, _ => 0 };
+    let v_float = match val {
+        Value::Float(f) => f,
+        Value::Int(i) => i as f64,
+        _ => 0.0,
+    };
+    let c_int = match count_val {
+        Value::Int(i) => i.max(0) as usize,
+        _ => 0,
+    };
     let vec = crate::vm::simd::simd_vsplat_f(v_float, c_int);
-    save_value_to_operand(ctx.process, &dst_op, Value::FloatArray(Arc::new(RwLock::new(vec))));
+    save_value_to_operand(
+        ctx.process,
+        &dst_op,
+        Value::FloatArray(Arc::new(RwLock::new(vec))),
+    );
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -2916,11 +3789,16 @@ fn op_V_add_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let c = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
         (v, c, inst.operands[2].clone())
     };
-    let c_int = match c_val { Value::Int(i) => i, _ => 0 };
+    let c_int = match c_val {
+        Value::Int(i) => i,
+        _ => 0,
+    };
     let res = match v {
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vadd_ic(&ba, c_int))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vadd_ic(
+                &ba, c_int,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2937,11 +3815,16 @@ fn op_V_sub_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let c = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
         (v, c, inst.operands[2].clone())
     };
-    let c_int = match c_val { Value::Int(i) => i, _ => 0 };
+    let c_int = match c_val {
+        Value::Int(i) => i,
+        _ => 0,
+    };
     let res = match v {
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vsub_ic(&ba, c_int))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vsub_ic(
+                &ba, c_int,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2958,11 +3841,16 @@ fn op_V_mul_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let c = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
         (v, c, inst.operands[2].clone())
     };
-    let c_int = match c_val { Value::Int(i) => i, _ => 0 };
+    let c_int = match c_val {
+        Value::Int(i) => i,
+        _ => 0,
+    };
     let res = match v {
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vmul_ic(&ba, c_int))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vmul_ic(
+                &ba, c_int,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -2979,11 +3867,16 @@ fn op_V_div_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let c = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
         (v, c, inst.operands[2].clone())
     };
-    let c_int = match c_val { Value::Int(i) => i, _ => 0 };
+    let c_int = match c_val {
+        Value::Int(i) => i,
+        _ => 0,
+    };
     let res = match v {
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vdiv_ic(&ba, c_int))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vdiv_ic(
+                &ba, c_int,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3000,11 +3893,16 @@ fn op_V_rem_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let c = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
         (v, c, inst.operands[2].clone())
     };
-    let c_int = match c_val { Value::Int(i) => i, _ => 0 };
+    let c_int = match c_val {
+        Value::Int(i) => i,
+        _ => 0,
+    };
     let res = match v {
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vrem_ic(&ba, c_int))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vrem_ic(
+                &ba, c_int,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3025,7 +3923,9 @@ fn op_V_div_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vdiv_i(&ba, &bb))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vdiv_i(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3046,7 +3946,9 @@ fn op_V_rem_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vrem_i(&ba, &bb))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vrem_i(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3067,7 +3969,9 @@ fn op_V_div_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::FloatArray(Arc::new(RwLock::new(crate::vm::simd::simd_vdiv_f(&ba, &bb))))
+            Value::FloatArray(Arc::new(RwLock::new(crate::vm::simd::simd_vdiv_f(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3088,7 +3992,9 @@ fn op_V_gather_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(t), Value::IntArray(idx)) => {
             let bt = t.read().unwrap();
             let bidx = idx.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vgather_i(&bt, &bidx))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vgather_i(
+                &bt, &bidx,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3109,7 +4015,9 @@ fn op_V_cmp_eq_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vcmp_eq_i(&ba, &bb))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vcmp_eq_i(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3130,7 +4038,9 @@ fn op_V_cmp_gt_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vcmp_gt_i(&ba, &bb))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vcmp_gt_i(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3151,7 +4061,9 @@ fn op_V_cmp_lt_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vcmp_lt_i(&ba, &bb))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vcmp_lt_i(
+                &ba, &bb,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3172,7 +4084,9 @@ fn op_V_filter_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (Value::IntArray(vals), Value::IntArray(mask)) => {
             let bvals = vals.read().unwrap();
             let bmask = mask.read().unwrap();
-            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vfilter_i(&bvals, &bmask))))
+            Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vfilter_i(
+                &bvals, &bmask,
+            ))))
         }
         _ => Value::Nil,
     };
@@ -3212,11 +4126,26 @@ fn op_shr<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_shl_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     let shift = (r as u64) & 63;
     set_reg_value_in_frame(frame, dst, Value::Int(l.wrapping_shl(shift as u32)));
     frame.pc += 1;
@@ -3226,10 +4155,22 @@ fn op_I_shl_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_shl_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     let shift = (c as u64) & 63;
     set_reg_value_in_frame(frame, dst, Value::Int(l.wrapping_shl(shift as u32)));
     frame.pc += 1;
@@ -3239,11 +4180,26 @@ fn op_I_shl_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_shr_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     let shift = (r as u64) & 63;
     set_reg_value_in_frame(frame, dst, Value::Int(l.wrapping_shr(shift as u32)));
     frame.pc += 1;
@@ -3253,10 +4209,22 @@ fn op_I_shr_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_shr_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     let shift = (c as u64) & 63;
     set_reg_value_in_frame(frame, dst, Value::Int(l.wrapping_shr(shift as u32)));
     frame.pc += 1;
@@ -3266,11 +4234,26 @@ fn op_I_shr_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_and_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l & r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -3279,10 +4262,22 @@ fn op_I_and_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_and_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l & c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -3291,11 +4286,26 @@ fn op_I_and_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_or_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l | r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -3304,10 +4314,22 @@ fn op_I_or_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_or_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l | c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -3316,11 +4338,26 @@ fn op_I_or_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_xor_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let r1 = match inst.operands[1] { OperandType::Register(r) => r, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
-    let r = match frame.registers.get(r1) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let r1 = match inst.operands[1] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    let r = match frame.registers.get(r1) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l ^ r));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -3329,10 +4366,22 @@ fn op_I_xor_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 fn op_I_xor_RCR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     let frame = ctx.process.frame_stack.last_mut().unwrap();
     let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-    let r0 = match inst.operands[0] { OperandType::Register(r) => r, _ => 0 };
-    let c = match inst.operands[1] { OperandType::Constant(Value::Int(i)) => i, _ => 0 };
-    let dst = match inst.operands[2] { OperandType::Register(r) => r, _ => 0 };
-    let l = match frame.registers.get(r0) { Some(Value::Int(i)) => *i, _ => 0 };
+    let r0 = match inst.operands[0] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let c = match inst.operands[1] {
+        OperandType::Constant(Value::Int(i)) => i,
+        _ => 0,
+    };
+    let dst = match inst.operands[2] {
+        OperandType::Register(r) => r,
+        _ => 0,
+    };
+    let l = match frame.registers.get(r0) {
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
     set_reg_value_in_frame(frame, dst, Value::Int(l ^ c));
     frame.pc += 1;
     become fetch_and_dispatch(ctx);
@@ -3393,7 +4442,9 @@ fn op_build_string<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         } else if inst.operands.len() == 1 {
             (vec![], inst.operands[0].clone())
         } else {
-            return ExecutionResult::Error("build_string requires at least 1 operand (destination)".to_string());
+            return ExecutionResult::Error(
+                "build_string requires at least 1 operand (destination)".to_string(),
+            );
         }
     };
 
@@ -3413,7 +4464,9 @@ fn op_make_env<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         let frame = ctx.process.frame_stack.last().unwrap();
         let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
         if inst.operands.is_empty() {
-            return ExecutionResult::Error("make_env requires at least destination operand".to_string());
+            return ExecutionResult::Error(
+                "make_env requires at least destination operand".to_string(),
+            );
         }
         if inst.operands.len() == 1 {
             (vec![], inst.operands[0].clone())
@@ -3438,7 +4491,11 @@ fn op_make_env<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
             let n = inst.operands.len();
             let mut vals = Vec::with_capacity(n - 1);
             for i in 0..(n - 1) {
-                vals.push(resolve_operand(ctx.bytecode, ctx.process, &inst.operands[i]));
+                vals.push(resolve_operand(
+                    ctx.bytecode,
+                    ctx.process,
+                    &inst.operands[i],
+                ));
             }
             (vals, inst.operands[n - 1].clone())
         }
@@ -3455,170 +4512,160 @@ fn op_make_env<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 // -----------------------------------------------------------------------------
 
 pub static DISPATCH_TABLE: [HandlerFn; OPCODE_COUNT] = [
-    op_load_const,             // 0: LoadConst
-    op_add,                    // 1: Add
-    op_sub,                    // 2: Sub
-    op_mul,                    // 3: Mul
-    op_div,                    // 4: Div
-    op_rem,                    // 5: Rem
-    op_neg,                    // 6: Neg
-    op_jump,                   // 7: Jump
-    op_jump_true,              // 8: JumpTrue
-    op_jump_false,             // 9: JumpFalse
-    op_call,                   // 10: Call
-    op_ret,                    // 11: Ret
-    op_eq,                     // 12: Eq
-    op_lt,                     // 13: Lt
-    op_gt,                     // 14: Gt
-    op_lte,                    // 15: Le
-    op_gte,                    // 16: Ge
-    op_neq,                    // 17: Neq
-    op_match_pattern,          // 18: Match
-    op_and,                    // 19: And
-    op_or,                     // 20: Or
-    op_xor,                    // 21: Xor
-    op_not,                    // 22: Not
-    op_get_prop,               // 23: GetProp
-    op_set_prop,               // 24: SetProp
-    op_get_index,              // 25: GetIndex
-    op_new_object,             // 26: NewObject
-    op_make_closure,           // 27: MakeClosure
-    op_send,                   // 28: Send
-    op_receive,                // 29: Receive
-    op_spawn,                  // 30: Spawn
-    op_swap,                   // 31: Swap
-    op_nop,                    // 32: Nop
-
-    op_I_add_RRR,              // 33: IAddRRR
-    op_I_sub_RRR,              // 34: ISubRRR
-    op_I_mul_RRR,              // 35: IMulRRR
-    op_I_div_RCR,              // 36: IDivRCR
-    op_I_rem_RCR,              // 37: IRemRCR
-    op_I_eq_RRR,               // 38: IEqRRR
-    op_I_lt_RRR,               // 39: ILtRRR
-    op_I_gt_RRR,               // 40: IGtRRR
-    op_I_gt_RCR,               // 41: IGtRCR
-    op_F_add_RRR,              // FAddRRR
-    op_F_sub_RRR,              // FSubRRR
-    op_F_mul_RRR,              // FMulRRR
-    op_F_div_RRR,              // FDivRRR
-    op_F_eq_RRR,               // FEqRRR
-    op_F_lt_RRR,               // FLtRRR
-    op_F_gt_RRR,               // FGtRRR
-    op_I_jump_true_R,          // IJumpTrueR
-    op_I_jump_false_R,         // IJumpFalseR
-    op_A_get_index_AR,         // AGetIndexAR
-
-    op_I_gt_jmp_RR,            // IGtJmpRR
-    op_I_gt_jmp_RC,            // IGtJmpRC
-    op_I_lt_jmp_RR,            // ILtJmpRR
-    op_I_lt_jmp_RC,            // ILtJmpRC
-    op_I_eq_jmp_RR,            // IEqJmpRR
-    op_I_eq_jmp_RC,            // IEqJmpRC
-    op_F_gt_jmp_RR,            // FGtJmpRR
-    op_F_gt_jmp_RC,            // FGtJmpRC
-    op_F_lt_jmp_RR,            // FLtJmpRR
-    op_F_lt_jmp_RC,            // FLtJmpRC
-
-    op_S_concat_RRR,           // 57: SConcatRRR
-    op_S_slice_RRR,            // 58: SSliceRRR
-    op_S_slice_RRRR,           // 59: SSliceRRRR
-    op_S_eq_RRR,               // 60: SEqRRR
-    op_S_find_RRR,             // 61: SFindRRR
-    op_S_to_int_RR,            // 62: SToIntRR
-
-    op_E_make_enum,            // 63: EMakeEnum
-    op_E_get_tag_RR,           // 64: EGetTagRR
-    op_E_get_payload_RR,       // 65: EGetPayloadRRC
+    op_load_const,    // 0: LoadConst
+    op_add,           // 1: Add
+    op_sub,           // 2: Sub
+    op_mul,           // 3: Mul
+    op_div,           // 4: Div
+    op_rem,           // 5: Rem
+    op_neg,           // 6: Neg
+    op_jump,          // 7: Jump
+    op_jump_true,     // 8: JumpTrue
+    op_jump_false,    // 9: JumpFalse
+    op_call,          // 10: Call
+    op_ret,           // 11: Ret
+    op_eq,            // 12: Eq
+    op_lt,            // 13: Lt
+    op_gt,            // 14: Gt
+    op_lte,           // 15: Le
+    op_gte,           // 16: Ge
+    op_neq,           // 17: Neq
+    op_match_pattern, // 18: Match
+    op_and,           // 19: And
+    op_or,            // 20: Or
+    op_xor,           // 21: Xor
+    op_not,           // 22: Not
+    op_get_prop,      // 23: GetProp
+    op_set_prop,      // 24: SetProp
+    op_get_index,     // 25: GetIndex
+    op_new_object,    // 26: NewObject
+    op_make_closure,  // 27: MakeClosure
+    op_send,          // 28: Send
+    op_receive,       // 29: Receive
+    op_spawn,         // 30: Spawn
+    op_swap,          // 31: Swap
+    op_nop,           // 32: Nop
+    op_I_add_RRR,     // 33: IAddRRR
+    op_I_sub_RRR,     // 34: ISubRRR
+    op_I_mul_RRR,     // 35: IMulRRR
+    op_I_div_RCR,     // 36: IDivRCR
+    op_I_rem_RCR,     // 37: IRemRCR
+    op_I_eq_RRR,      // 38: IEqRRR
+    op_I_lt_RRR,      // 39: ILtRRR
+    op_I_gt_RRR,      // 40: IGtRRR
+    op_I_gt_RCR,      // 41: IGtRCR
+    op_F_add_RRR,     // FAddRRR
+    op_F_sub_RRR,     // FSubRRR
+    op_F_mul_RRR,     // FMulRRR
+    op_F_div_RRR,     // FDivRRR
+    op_F_eq_RRR,      // FEqRRR
+    op_F_lt_RRR,      // FLtRRR
+    op_F_gt_RRR,      // FGtRRR
+    op_I_jump_true_R, // IJumpTrueR
+    op_I_jump_false_R, // IJumpFalseR
+    op_A_get_index_AR, // AGetIndexAR
+    op_I_gt_jmp_RR,   // IGtJmpRR
+    op_I_gt_jmp_RC,   // IGtJmpRC
+    op_I_lt_jmp_RR,   // ILtJmpRR
+    op_I_lt_jmp_RC,   // ILtJmpRC
+    op_I_eq_jmp_RR,   // IEqJmpRR
+    op_I_eq_jmp_RC,   // IEqJmpRC
+    op_F_gt_jmp_RR,   // FGtJmpRR
+    op_F_gt_jmp_RC,   // FGtJmpRC
+    op_F_lt_jmp_RR,   // FLtJmpRR
+    op_F_lt_jmp_RC,   // FLtJmpRC
+    op_S_concat_RRR,  // 57: SConcatRRR
+    op_S_slice_RRR,   // 58: SSliceRRR
+    op_S_slice_RRRR,  // 59: SSliceRRRR
+    op_S_eq_RRR,      // 60: SEqRRR
+    op_S_find_RRR,    // 61: SFindRRR
+    op_S_to_int_RR,   // 62: SToIntRR
+    op_E_make_enum,   // 63: EMakeEnum
+    op_E_get_tag_RR,  // 64: EGetTagRR
+    op_E_get_payload_RR, // 65: EGetPayloadRRC
     op_E_get_payload_RR_multi, // 66: EGetPayloadRRMulti
-    op_E_tag_jmp_RC,           // 67: ETagJmpRC
-    op_E_tag_switch,           // 68: ETagSwitch
-    op_A_match_fast,           // 69: AMatchFast
-
-    op_new_array,              // 70: NewArray
-    op_new_int_array,          // 71: NewIntArray
-    op_new_float_array,        // 72: NewFloatArray
-    op_array_len,              // 73: ArrayLen
-    op_array_push,             // 74: ArrayPush
-    op_array_get,              // 75: ArrayGet
-    op_array_set,              // 76: ArraySet
-
-    op_V_add_F,                // 77: VAddF
-    op_V_sub_F,                // 78: VSubF
-    op_V_mul_F,                // 79: VMulF
-    op_V_dot_F,                // 80: VDotF
-    op_V_add_I,                // 81: VAddI
-    op_V_sub_I,                // 82: VSubI
-    op_V_mul_I,                // 83: VMulI
-    op_V_sum_I,                // 84: VSumI
-    op_V_sum_F,                // 85: VSumF
-
-    op_S_upper_RR,             // 86: SUpperRR
-    op_S_lower_RR,             // 87: SLowerRR
-    op_S_count_byte_RRR,       // 88: SCountByteRRR
-
-    op_I_add_RCR,              // 89: IAddRCR
-    op_call_jit,               // 90: CallJit
-    op_V_munch_range,          // 91: VMunchRange
-
-    op_V_iota_I,               // 92: VIotaI
-    op_V_splat_I,              // 93: VSplatI
-    op_V_splat_F,              // 94: VSplatF
-    op_V_add_IC,               // 95: VAddIC
-    op_V_sub_IC,               // 96: VSubIC
-    op_V_mul_IC,               // 97: VMulIC
-    op_V_div_IC,               // 98: VDivIC
-    op_V_rem_IC,               // 99: VRemIC
-    op_V_div_I,                // 100: VDivI
-    op_V_rem_I,                // 101: VRemI
-    op_V_div_F,                // 102: VDivF
-    op_V_gather_I,             // 103: VGatherI
-    op_V_cmp_eq_I,             // 104: VCmpEqI
-    op_V_cmp_gt_I,             // 105: VCmpGtI
-    op_V_cmp_lt_I,             // 106: VCmpLtI
-    op_V_filter_I,             // 107: VFilterI
-    op_I_array_get,            // 108: IArrayGet
-    op_I_array_set,            // 109: IArraySet
-    op_F_array_get,            // 110: FArrayGet
-    op_F_array_set,            // 111: FArraySet
-    op_shl,                    // 112: Shl
-    op_shr,                    // 113: Shr
-    op_I_shl_RRR,              // 114: IShlRRR
-    op_I_shl_RCR,              // 115: IShlRCR
-    op_I_shr_RRR,              // 116: IShrRRR
-    op_I_shr_RCR,              // 117: IShrRCR
-    op_I_and_RRR,              // 118: IAndRRR
-    op_I_and_RCR,              // 119: IAndRCR
-    op_I_or_RRR,               // 120: IOrRRR
-    op_I_or_RCR,               // 121: IOrRCR
-    op_I_xor_RRR,              // 122: IXorRRR
-    op_I_xor_RCR,              // 123: IXorRCR
-    op_I_bit_get,              // 124: IBitGet
-    op_I_bit_set,              // 125: IBitSet
-    op_I_bit_set1,             // 126: IBitSet1
-    op_I_bit_set0,             // 127: IBitSet0
-    op_format_value,           // 128: FormatValue
-    op_build_string,           // 129: BuildString
-    op_make_env,               // 130: MakeEnv
-
-    op_I_sub_RCR,              // 131: ISubRCR
-    op_I_sub_CRR,              // 132: ISubCRR
-    op_I_mul_RCR,              // 133: IMulRCR
-    op_I_div_CRR,              // 134: IDivCRR
-    op_I_rem_CRR,              // 135: IRemCRR
-    op_I_eq_RCR,               // 136: IEqRCR
-    op_I_lt_RCR,               // 137: ILtRCR
-    op_I_lt_CRR,               // 138: ILtCRR
-    op_I_gt_CRR,               // 139: IGtCRR
-    op_F_add_RCR,              // 140: FAddRCR
-    op_F_sub_RCR,              // 141: FSubRCR
-    op_F_sub_CRR,              // 142: FSubCRR
-    op_F_mul_RCR,              // 143: FMulRCR
-    op_F_div_RCR,              // 144: FDivRCR
-    op_F_div_CRR,              // 145: FDivCRR
-    op_F_eq_RCR,               // 146: FEqRCR
-    op_F_lt_RCR,               // 147: FLtRCR
-    op_F_lt_CRR,               // 148: FLtCRR
-    op_F_gt_RCR,               // 149: FGtRCR
-    op_F_gt_CRR,               // 150: FGtCRR
+    op_E_tag_jmp_RC,  // 67: ETagJmpRC
+    op_E_tag_switch,  // 68: ETagSwitch
+    op_A_match_fast,  // 69: AMatchFast
+    op_new_array,     // 70: NewArray
+    op_new_int_array, // 71: NewIntArray
+    op_new_float_array, // 72: NewFloatArray
+    op_array_len,     // 73: ArrayLen
+    op_array_push,    // 74: ArrayPush
+    op_array_get,     // 75: ArrayGet
+    op_array_set,     // 76: ArraySet
+    op_V_add_F,       // 77: VAddF
+    op_V_sub_F,       // 78: VSubF
+    op_V_mul_F,       // 79: VMulF
+    op_V_dot_F,       // 80: VDotF
+    op_V_add_I,       // 81: VAddI
+    op_V_sub_I,       // 82: VSubI
+    op_V_mul_I,       // 83: VMulI
+    op_V_sum_I,       // 84: VSumI
+    op_V_sum_F,       // 85: VSumF
+    op_S_upper_RR,    // 86: SUpperRR
+    op_S_lower_RR,    // 87: SLowerRR
+    op_S_count_byte_RRR, // 88: SCountByteRRR
+    op_I_add_RCR,     // 89: IAddRCR
+    op_call_jit,      // 90: CallJit
+    op_V_munch_range, // 91: VMunchRange
+    op_V_iota_I,      // 92: VIotaI
+    op_V_splat_I,     // 93: VSplatI
+    op_V_splat_F,     // 94: VSplatF
+    op_V_add_IC,      // 95: VAddIC
+    op_V_sub_IC,      // 96: VSubIC
+    op_V_mul_IC,      // 97: VMulIC
+    op_V_div_IC,      // 98: VDivIC
+    op_V_rem_IC,      // 99: VRemIC
+    op_V_div_I,       // 100: VDivI
+    op_V_rem_I,       // 101: VRemI
+    op_V_div_F,       // 102: VDivF
+    op_V_gather_I,    // 103: VGatherI
+    op_V_cmp_eq_I,    // 104: VCmpEqI
+    op_V_cmp_gt_I,    // 105: VCmpGtI
+    op_V_cmp_lt_I,    // 106: VCmpLtI
+    op_V_filter_I,    // 107: VFilterI
+    op_I_array_get,   // 108: IArrayGet
+    op_I_array_set,   // 109: IArraySet
+    op_F_array_get,   // 110: FArrayGet
+    op_F_array_set,   // 111: FArraySet
+    op_shl,           // 112: Shl
+    op_shr,           // 113: Shr
+    op_I_shl_RRR,     // 114: IShlRRR
+    op_I_shl_RCR,     // 115: IShlRCR
+    op_I_shr_RRR,     // 116: IShrRRR
+    op_I_shr_RCR,     // 117: IShrRCR
+    op_I_and_RRR,     // 118: IAndRRR
+    op_I_and_RCR,     // 119: IAndRCR
+    op_I_or_RRR,      // 120: IOrRRR
+    op_I_or_RCR,      // 121: IOrRCR
+    op_I_xor_RRR,     // 122: IXorRRR
+    op_I_xor_RCR,     // 123: IXorRCR
+    op_I_bit_get,     // 124: IBitGet
+    op_I_bit_set,     // 125: IBitSet
+    op_I_bit_set1,    // 126: IBitSet1
+    op_I_bit_set0,    // 127: IBitSet0
+    op_format_value,  // 128: FormatValue
+    op_build_string,  // 129: BuildString
+    op_make_env,      // 130: MakeEnv
+    op_I_sub_RCR,     // 131: ISubRCR
+    op_I_sub_CRR,     // 132: ISubCRR
+    op_I_mul_RCR,     // 133: IMulRCR
+    op_I_div_CRR,     // 134: IDivCRR
+    op_I_rem_CRR,     // 135: IRemCRR
+    op_I_eq_RCR,      // 136: IEqRCR
+    op_I_lt_RCR,      // 137: ILtRCR
+    op_I_lt_CRR,      // 138: ILtCRR
+    op_I_gt_CRR,      // 139: IGtCRR
+    op_F_add_RCR,     // 140: FAddRCR
+    op_F_sub_RCR,     // 141: FSubRCR
+    op_F_sub_CRR,     // 142: FSubCRR
+    op_F_mul_RCR,     // 143: FMulRCR
+    op_F_div_RCR,     // 144: FDivRCR
+    op_F_div_CRR,     // 145: FDivCRR
+    op_F_eq_RCR,      // 146: FEqRCR
+    op_F_lt_RCR,      // 147: FLtRCR
+    op_F_lt_CRR,      // 148: FLtCRR
+    op_F_gt_RCR,      // 149: FGtRCR
+    op_F_gt_CRR,      // 150: FGtCRR
 ];

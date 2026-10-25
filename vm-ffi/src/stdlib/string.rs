@@ -146,12 +146,46 @@ string_function!(StrRepeat, 2, FfiType::String, "Repeats string n times", |args|
     Ok(FfiValue::String(s.repeat(n)))
 });
 
-string_function!(StrToInt, 1, FfiType::Int, "Parses integer from string", |args| {
-    let s = extract_string(&args[0])?;
-    let trimmed = s.trim();
-    let val = trimmed.parse::<i64>().unwrap_or(0);
-    Ok(FfiValue::Integer(val))
-});
+pub struct StrToInt;
+
+impl RawFfiFunction for StrToInt {
+    fn call(&self, ctx: &mut dyn crate::FfiContext, args: Vec<FfiValue>) -> FfiResult {
+        if args.len() != 1 {
+            return Err(FfiError::ArgumentCount {
+                expected: 1,
+                got: args.len(),
+            });
+        }
+        let s = extract_string(&args[0])?;
+        let result = match s.trim().parse::<i64>() {
+            Ok(value) => ctx.make_enum("Result", "ok", Some(FfiValue::Integer(value))),
+            Err(error) => ctx.make_enum(
+                "Result",
+                "err",
+                Some(FfiValue::String(error.to_string())),
+            ),
+        };
+        Ok(result.into())
+    }
+
+    fn name(&self) -> &str {
+        "StrToInt"
+    }
+
+    fn arity(&self) -> usize {
+        1
+    }
+
+    fn return_type(&self) -> FfiType {
+        FfiType::Any
+    }
+
+    fn description(&self) -> Option<&str> {
+        Some("Parses an integer and returns Result[Int, String]")
+    }
+}
+
+impl FfiFunction for StrToInt {}
 
 string_function!(StrLen, 1, FfiType::Int, "Returns character count of string", |args| {
     let s = extract_string(&args[0])?;

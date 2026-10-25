@@ -8,9 +8,46 @@ pub use native as native_lib;
 pub mod net;
 pub mod properties;
 
-use crate::lang::types::{ValType, Value};
+use crate::bytecode::instruction::Bytecode;
+use crate::lang::types::{Object, Protection, ValType, Value};
+use std::sync::{Arc, RwLock};
 
 pub fn call_native(name: &str, args: &[Value]) -> Option<Value> {
+    call_native_with_bytecode(name, args, None)
+}
+
+pub fn call_native_with_bytecode(
+    name: &str,
+    args: &[Value],
+    bytecode: Option<&Bytecode>,
+) -> Option<Value> {
+    if name == "get" {
+        if let (Some(bytecode), [array, Value::Int(index)]) = (bytecode, args) {
+            let index = usize::try_from(*index).ok();
+            let value = index.and_then(|index| match array {
+                Value::Array(array) => array.read().ok()?.get(index).cloned(),
+                Value::IntArray(array) => array.read().ok()?.get(index).copied().map(Value::Int),
+                Value::FloatArray(array) => {
+                    array.read().ok()?.get(index).copied().map(Value::Float)
+                }
+                _ => None,
+            });
+            return Some(make_option(bytecode, value));
+        }
+    }
+
+    if name == "pop" {
+        if let (Some(bytecode), Some(array)) = (bytecode, args.first()) {
+            let value = match array {
+                Value::Array(array) => array.write().ok()?.pop(),
+                Value::IntArray(array) => array.write().ok()?.pop().map(Value::Int),
+                Value::FloatArray(array) => array.write().ok()?.pop().map(Value::Float),
+                _ => return None,
+            };
+            return Some(make_option(bytecode, value));
+        }
+    }
+
     match name {
         "format" => {
             if args.is_empty() {
@@ -27,6 +64,7 @@ pub fn call_native(name: &str, args: &[Value]) -> Option<Value> {
                 Some(Value::String(crate::lang::format::format_value_with_spec(&args[0], spec)))
             }
         }
+
         "println" => io::println(args).ok(),
         "print" => io::print(args).ok(),
         "time" => Some(io::time()),
@@ -42,6 +80,7 @@ pub fn call_native(name: &str, args: &[Value]) -> Option<Value> {
                     _ => None,
                 }
             }
+
         }
         "push" => {
             if args.len() >= 2 {
@@ -71,7 +110,10 @@ pub fn call_native(name: &str, args: &[Value]) -> Option<Value> {
         "tcp_recv" => net::tcp_recv(args).ok(),
         "tcp_send" => net::tcp_send(args).ok(),
         "tcp_close" => net::tcp_close(args).ok(),
-        _ => ffi::call_ffi(name, args),
+        _ => match bytecode {
+            Some(bytecode) => ffi::call_ffi_with_bytecode(name, args, bytecode),
+            None => ffi::call_ffi(name, args),
+        },
     }
 }
 
@@ -93,3 +135,30 @@ pub fn get_native_return_type(name: &str) -> Option<ValType> {
     }
 }
 
+pub fn make_option(bytecode: &Bytecode, value: Option<Value>) -> Value {
+    let (variant, payload) = match value {
+        Some(value) => ("some", Some(value)),
+        None => ("none", None),
+    };
+    let prototype = bytecode
+        .object_inits
+        .iter()
+        .find(|(name, _)| name.ends_with(".Option"))
+        .map(|(_, prototype)| Arc::clone(prototype));
+    let type_name = prototype
+        .as_ref()
+        .and_then(|prototype| prototype.read().ok()?.get_property("@"))
+        .and_then(|tag| match tag {
+            Value::String(name) => Some(name),
+            _ => None,
+        })
+        .unwrap_or_else(|| "Option".to_string());
+    let mut object = Object::new(prototype);
+    object.set_property("@", Value::String(type_name), Protection::Readonly);
+    object.set_property("@@", Value::String(variant.to_string()), Protection::Readonly);
+    if let Some(payload) = payload {
+        object.set_property("@payload_0", payload.clone(), Protection::Writeable);
+        object.set_property("0", payload, Protection::Writeable);
+    }
+    Value::Object(Arc::new(RwLock::new(object)))
+}

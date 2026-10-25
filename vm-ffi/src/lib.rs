@@ -117,6 +117,19 @@ impl PartialEq for FfiValue {
 /// Context passed to FFI functions to allow interaction with the VM
 pub trait FfiContext {
     fn get_this(&self) -> Option<FfiValue>;
+
+    /// Builds a tagged enum value; VM contexts can qualify its type name.
+    fn make_enum(&self, enum_name: &str, variant_name: &str, payload: Option<FfiValue>) -> FfiValue {
+        let mut properties = HashMap::from([
+            ("@".to_string(), FfiValue::String(enum_name.to_string())),
+            ("@@".to_string(), FfiValue::String(variant_name.to_string())),
+        ]);
+        if let Some(payload) = payload {
+            properties.insert("@payload_0".to_string(), payload.clone());
+            properties.insert("0".to_string(), payload);
+        }
+        FfiValue::Object(properties)
+    }
 }
 
 /// Return value from an FFI function call:

@@ -225,10 +225,11 @@ fn main() {
         let mut registers = vec![Value::Nil; 16];
         let args = vec![Value::Int(limit as i64), Value::IntArray(Arc::clone(&flags))];
         let mut result = Value::Nil;
+        let mut undefined_self = Value::Nil;
 
         let t0 = Instant::now();
         unsafe {
-            jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+            jit_fn(registers.as_mut_ptr(), &mut undefined_self as *mut Value, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
         }
         let jit_time = t0.elapsed().as_secs_f64();
         let jit_count = match result {

@@ -1,4 +1,4 @@
-fn make_handlers(inp Int):
+fn make_handlers(inp: Int):
     let x = inp
     const steps = [
         fn() -> Int:
@@ -11,7 +11,7 @@ fn make_handlers(inp Int):
     steps
 
 const funcs = make_handlers(10)
-const result1 = funcs[0]()
-debug(result1)
+const result1 = funcs[1]()
+println(result1)
 const result2 = funcs[0]()
-debug(result2)
+println(result2)

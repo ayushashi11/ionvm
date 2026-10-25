@@ -109,11 +109,71 @@ impl FromFfiValue for Value {
     }
 }
 
-pub struct VmFfiContext;
+pub struct VmFfiContext<'a> {
+    bytecode: Option<&'a crate::bytecode::instruction::Bytecode>,
+}
 
-impl FfiContext for VmFfiContext {
+impl<'a> VmFfiContext<'a> {
+    fn new(bytecode: Option<&'a crate::bytecode::instruction::Bytecode>) -> Self {
+        Self { bytecode }
+    }
+
+    fn convert_value(&self, value: FfiValue) -> Result<Value, FfiError> {
+        let mut value = Value::from_ffi(value)?;
+        if let (Some(bytecode), Value::Object(object)) = (self.bytecode, &mut value) {
+            let enum_name = object.read().ok().and_then(|object| {
+                match (object.get_property("@"), object.get_property("@@")) {
+                    (Some(Value::String(name)), Some(Value::String(_))) => Some(name),
+                    _ => None,
+                }
+            });
+            if let Some(enum_name) = enum_name {
+                if let Some((_, prototype)) = bytecode
+                    .object_inits
+                    .iter()
+                    .find(|(name, _)| name == &enum_name)
+                {
+                    let mut object = object.write().map_err(|_| {
+                        FfiError::RuntimeError("enum result object lock poisoned".to_string())
+                    })?;
+                    object.prototype = Some(Arc::clone(prototype));
+                    for tag in ["@", "@@"] {
+                        if let Some(property) = object.properties.get_mut(tag) {
+                            property.protection = Protection::Readonly;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(value)
+    }
+}
+
+impl FfiContext for VmFfiContext<'_> {
     fn get_this(&self) -> Option<FfiValue> {
         None
+    }
+
+    fn make_enum(&self, enum_name: &str, variant_name: &str, payload: Option<FfiValue>) -> FfiValue {
+        let compiled_name = self
+            .bytecode
+            .and_then(|bytecode| {
+                bytecode
+                    .object_inits
+                    .iter()
+                    .find(|(name, _)| name == enum_name || name.ends_with(&format!(".{enum_name}")))
+                    .map(|(name, _)| name.clone())
+            })
+            .unwrap_or_else(|| enum_name.to_string());
+        let mut properties = HashMap::from([
+            ("@".to_string(), FfiValue::String(compiled_name)),
+            ("@@".to_string(), FfiValue::String(variant_name.to_string())),
+        ]);
+        if let Some(payload) = payload {
+            properties.insert("@payload_0".to_string(), payload.clone());
+            properties.insert("0".to_string(), payload);
+        }
+        FfiValue::Object(properties)
     }
 }
 
@@ -155,9 +215,9 @@ fn snake_to_pascal(s: &str) -> String {
         .collect()
 }
 
-fn handle_ffi_return(res: FfiReturn) -> Option<Value> {
+fn handle_ffi_return(res: FfiReturn, context: &VmFfiContext<'_>) -> Option<Value> {
     match res {
-        FfiReturn::Value(v) => Value::from_ffi(v).ok(),
+        FfiReturn::Value(v) => context.convert_value(v).ok(),
         FfiReturn::Callback { name, args } => {
             let cb_vm_args: Vec<Value> = args
                 .into_iter()
@@ -198,18 +258,18 @@ pub fn call_ffi(name: &str, args: &[Value]) -> Option<Value> {
         sync_if_needed(reg_cell);
         let registry = reg_cell.borrow();
         let ffi_args: Vec<FfiValue> = args.iter().map(|v| v.to_ffi()).collect();
-        let mut ctx = VmFfiContext;
+        let mut ctx = VmFfiContext::new(None);
 
         // 1. Direct name lookup (e.g. "Sqrt", "ReadFile", "GetTime", "gui.show_message")
         if let Ok(res) = registry.call(&mut ctx, name, ffi_args.clone()) {
-            return handle_ffi_return(res);
+            return handle_ffi_return(res, &ctx);
         }
 
         // 2. Snake_case to PascalCase lookup (e.g. "sqrt" -> "Sqrt", "read_file" -> "ReadFile")
         let pascal_name = snake_to_pascal(name);
         if pascal_name != name {
             if let Ok(res) = registry.call(&mut ctx, &pascal_name, ffi_args.clone()) {
-                return handle_ffi_return(res);
+                return handle_ffi_return(res, &ctx);
             }
         }
 
@@ -217,12 +277,12 @@ pub fn call_ffi(name: &str, args: &[Value]) -> Option<Value> {
         if let Some(leaf) = name.split('.').last() {
             if leaf != name {
                 if let Ok(res) = registry.call(&mut ctx, leaf, ffi_args.clone()) {
-                    return handle_ffi_return(res);
+                    return handle_ffi_return(res, &ctx);
                 }
                 let pascal_leaf = snake_to_pascal(leaf);
                 if pascal_leaf != leaf {
                     if let Ok(res) = registry.call(&mut ctx, &pascal_leaf, ffi_args) {
-                        return handle_ffi_return(res);
+                        return handle_ffi_return(res, &ctx);
                     }
                 }
             }
@@ -232,13 +292,49 @@ pub fn call_ffi(name: &str, args: &[Value]) -> Option<Value> {
     })
 }
 
+pub fn call_ffi_with_bytecode(
+    name: &str,
+    args: &[Value],
+    bytecode: &crate::bytecode::instruction::Bytecode,
+) -> Option<Value> {
+    FFI_REGISTRY.with(|reg_cell| {
+        sync_if_needed(reg_cell);
+        let registry = reg_cell.borrow();
+        let ffi_args: Vec<FfiValue> = args.iter().map(|v| v.to_ffi()).collect();
+        let mut ctx = VmFfiContext::new(Some(bytecode));
+
+        for candidate in ffi_name_candidates(name) {
+            if let Ok(result) = registry.call(&mut ctx, &candidate, ffi_args.clone()) {
+                return handle_ffi_return(result, &ctx);
+            }
+        }
+        None
+    })
+}
+
+fn ffi_name_candidates(name: &str) -> Vec<String> {
+    let mut candidates = vec![name.to_string()];
+    let pascal_name = snake_to_pascal(name);
+    if pascal_name != name {
+        candidates.push(pascal_name);
+    }
+    if let Some(leaf) = name.split('.').last().filter(|leaf| *leaf != name) {
+        candidates.push(leaf.to_string());
+        let pascal_leaf = snake_to_pascal(leaf);
+        if pascal_leaf != leaf {
+            candidates.push(pascal_leaf);
+        }
+    }
+    candidates
+}
+
 /// Call a registered FFI function by name and return the raw FfiReturn
 pub fn call_ffi_raw(name: &str, args: &[Value]) -> Result<FfiReturn, FfiError> {
     FFI_REGISTRY.with(|reg_cell| {
         sync_if_needed(reg_cell);
         let registry = reg_cell.borrow();
         let ffi_args: Vec<FfiValue> = args.iter().map(|v| v.to_ffi()).collect();
-        let mut ctx = VmFfiContext;
+        let mut ctx = VmFfiContext::new(None);
 
         if let Ok(res) = registry.call(&mut ctx, name, ffi_args.clone()) {
             return Ok(res);

@@ -791,9 +791,10 @@ fn test_sieve_bitpacked_jit() {
     let mut registers = vec![Value::Nil; 16];
     let args = vec![Value::Int(big_limit), Value::IntArray(Arc::clone(&big_flags))];
     let mut result = Value::Nil;
+    let undefined_self: *mut Value = std::ptr::null_mut();
 
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     match result {
         Value::Int(count) => assert_eq!(count, 664579, "Primes up to 10M must be exactly 664,579!"),
@@ -942,9 +943,10 @@ fn test_sieve_fused_bit_opcodes_jit() {
     let mut registers = vec![Value::Nil; 8];
     let args = vec![Value::Int(limit), Value::IntArray(Arc::clone(&flags))];
     let mut result = Value::Nil;
+    let undefined_self: *mut Value = std::ptr::null_mut();
 
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
 
     match result {
@@ -1727,32 +1729,33 @@ fn test_llvm_jit_match_switch() {
 
     let mut registers = vec![Value::Nil; 5];
     let mut result = Value::Nil;
+    let undefined_self: *mut Value = std::ptr::null_mut();
 
     // Test case 2 -> 200
     let args = vec![Value::Int(2)];
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     assert_eq!(result, Value::Int(200));
 
     // Test case 1 -> 100
     let args = vec![Value::Int(1)];
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     assert_eq!(result, Value::Int(100));
 
     // Test case 3 -> 300
     let args = vec![Value::Int(3)];
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     assert_eq!(result, Value::Int(300));
 
     // Test default -> -1
     let args = vec![Value::Int(99)];
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     assert_eq!(result, Value::Int(-1));
 }
@@ -1783,32 +1786,33 @@ fn test_llvm_jit_match_ranges() {
 
     let mut registers = vec![Value::Nil; 5];
     let mut result = Value::Nil;
+    let undefined_self: *mut Value = std::ptr::null_mut();
 
     // 7 is in 5..10 -> ret 1
     let args = vec![Value::Int(7)];
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     assert_eq!(result, Value::Int(1));
 
     // 20 is in 10..=20 -> ret 2
     let args = vec![Value::Int(20)];
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     assert_eq!(result, Value::Int(2));
 
     // 10 is in 10..=20 (since 5..10 is exclusive) -> ret 2
     let args = vec![Value::Int(10)];
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     assert_eq!(result, Value::Int(2));
 
     // 100 is in default -> ret 3
     let args = vec![Value::Int(100)];
     unsafe {
-        jit_fn(registers.as_mut_ptr(), args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+        jit_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
     }
     assert_eq!(result, Value::Int(3));
 }
