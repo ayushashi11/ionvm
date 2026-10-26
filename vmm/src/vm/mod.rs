@@ -9,15 +9,17 @@ use std::sync::{Arc, Mutex, Condvar};
 use crate::bytecode::instruction::{Bytecode, OperandType};
 use crate::lang::types::Value;
 use crate::vm::frame::Frame;
-use crate::vm::process::{Process, ProcessState};
+use crate::vm::process::{Process, ProcessState, WaitReason, WaitState};
 pub use executor::ExecutionResult;
 
-pub const PROC_REDUCTIONS: usize = 2_000;
+pub const PROC_REDUCTIONS: usize = 50_000;
 
 pub struct SchedulerState {
     pub ready_queue: VecDeque<Process>,
-    pub waiting_queue: HashMap<usize, Process>,
+    pub waiting_processes: HashMap<usize, (Process, WaitState)>,
     pub running_mailboxes: HashMap<usize, VecDeque<Value>>,
+    pub process_monitors: HashMap<usize, Vec<usize>>,
+    pub next_wait_id: u64,
     pub active_processes: usize,
     pub next_pid: usize,
     pub last_error: Option<String>,
@@ -57,13 +59,36 @@ impl Scheduler {
 
     pub fn send_message(&self, target_pid: usize, msg: Value) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
-        // 1. Target is waiting for a message: wake it up
-        if let Some(mut target) = state.waiting_queue.remove(&target_pid) {
-            target.mailbox.push_back(msg);
-            target.state = ProcessState::Running;
-            state.ready_queue.push_back(target);
-            self.cond.notify_one();
-            return Ok(());
+        // 1. Target is waiting for a message: check reason and wake
+        if let Some((mut target, wait_state)) = state.waiting_processes.remove(&target_pid) {
+            let matched = match &wait_state.reason {
+                WaitReason::AnyMessage => true,
+                WaitReason::SelectiveMessage { tag, .. } => {
+                    tag.as_ref().map_or(true, |expected_tag| {
+                        if let Value::Object(obj) = &msg {
+                            if let Ok(o) = obj.read() {
+                                if let Some(Value::String(actual_tag)) = o.get_property("@@") {
+                                    return actual_tag == *expected_tag;
+                                }
+                            }
+                        }
+                        false
+                    })
+                }
+                _ => false,
+            };
+
+            if matched {
+                target.mailbox.push_back(msg);
+                target.state = ProcessState::Running;
+                state.ready_queue.push_back(target);
+                self.cond.notify_one();
+                return Ok(());
+            } else {
+                target.mailbox.push_back(msg);
+                state.waiting_processes.insert(target_pid, (target, wait_state));
+                return Ok(());
+            }
         }
         // 2. Target is in ready_queue
         for p in state.ready_queue.iter_mut() {
@@ -75,6 +100,31 @@ impl Scheduler {
         // 3. Target is currently executing on another worker thread
         state.running_mailboxes.entry(target_pid).or_default().push_back(msg);
         Ok(())
+    }
+
+    pub fn wake_timeout(&self, pid: usize, wait_id: u64) {
+        let mut state = self.state.lock().unwrap();
+        if let Some((_, wait_state)) = state.waiting_processes.get(&pid) {
+            if wait_state.wait_id != wait_id {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        let (mut process, wait_state) = state.waiting_processes.remove(&pid).unwrap();
+        if let Some(dst_reg) = wait_state.dst_reg {
+            let val = wait_state.timeout_val.unwrap_or(Value::Nil);
+            if let Some(frame) = process.frame_stack.last_mut() {
+                if dst_reg < frame.registers.len() {
+                    frame.registers[dst_reg] = val;
+                }
+                frame.pc += 1;
+            }
+        }
+        process.state = ProcessState::Running;
+        state.ready_queue.push_back(process);
+        self.cond.notify_one();
     }
 }
 
@@ -119,14 +169,29 @@ pub fn worker_loop(sched: Arc<Scheduler>) {
                 state.ready_queue.push_back(process);
                 sched.cond.notify_one();
             }
-            ExecutionResult::WaitMessage => {
+            ExecutionResult::Wait(wait_state) => {
                 if !process.mailbox.is_empty() {
                     process.state = ProcessState::Running;
                     state.ready_queue.push_back(process);
                     sched.cond.notify_one();
                 } else {
-                    process.state = ProcessState::WaitingMessage;
-                    state.waiting_queue.insert(process.id, process);
+                    let wait_id = state.next_wait_id;
+                    state.next_wait_id += 1;
+                    let pid = process.id;
+                    let timeout = wait_state.timeout;
+
+                    let mut ws = *wait_state;
+                    ws.wait_id = wait_id;
+                    process.state = ProcessState::Waiting(ws.clone());
+                    state.waiting_processes.insert(pid, (process, ws));
+
+                    if let Some(duration) = timeout {
+                        let sched_clone = Arc::clone(&sched);
+                        std::thread::spawn(move || {
+                            std::thread::sleep(duration);
+                            sched_clone.wake_timeout(pid, wait_id);
+                        });
+                    }
                 }
             }
             ExecutionResult::Terminate => {
@@ -135,6 +200,24 @@ pub fn worker_loop(sched: Arc<Scheduler>) {
                 }
                 process.state = ProcessState::Terminated;
                 state.active_processes = state.active_processes.saturating_sub(1);
+                if let Some(observers) = state.process_monitors.remove(&process.id) {
+                    for obs_pid in observers {
+                        if let Some((mut obs_proc, obs_wait)) = state.waiting_processes.remove(&obs_pid) {
+                            if let Some(dst_reg) = obs_wait.dst_reg {
+                                let exit_val = process.entrypoint_return.clone().unwrap_or(Value::Nil);
+                                if let Some(frame) = obs_proc.frame_stack.last_mut() {
+                                    if dst_reg < frame.registers.len() {
+                                        frame.registers[dst_reg] = exit_val;
+                                    }
+                                    frame.pc += 1;
+                                }
+                            }
+                            obs_proc.state = ProcessState::Running;
+                            state.ready_queue.push_back(obs_proc);
+                            sched.cond.notify_one();
+                        }
+                    }
+                }
                 if state.active_processes == 0 {
                     sched.cond.notify_all();
                 }
@@ -226,8 +309,10 @@ impl IonVM {
 
         let state = SchedulerState {
             ready_queue,
-            waiting_queue: HashMap::new(),
+            waiting_processes: HashMap::new(),
             running_mailboxes: HashMap::new(),
+            process_monitors: HashMap::new(),
+            next_wait_id: 1,
             active_processes: 1,
             next_pid: 1,
             last_error: None,
@@ -282,18 +367,50 @@ impl IonVM {
                 process.state = ProcessState::Running;
                 state.ready_queue.push_back(process);
             }
-            ExecutionResult::WaitMessage => {
+            ExecutionResult::Wait(wait_state) => {
                 if !process.mailbox.is_empty() {
                     process.state = ProcessState::Running;
                     state.ready_queue.push_back(process);
                 } else {
-                    process.state = ProcessState::WaitingMessage;
-                    state.waiting_queue.insert(process.id, process);
+                    let wait_id = state.next_wait_id;
+                    state.next_wait_id += 1;
+                    let pid = process.id;
+                    let timeout = wait_state.timeout;
+
+                    let mut ws = *wait_state;
+                    ws.wait_id = wait_id;
+                    process.state = ProcessState::Waiting(ws.clone());
+                    state.waiting_processes.insert(pid, (process, ws));
+
+                    if let Some(duration) = timeout {
+                        let sched_clone = Arc::clone(&self.scheduler);
+                        std::thread::spawn(move || {
+                            std::thread::sleep(duration);
+                            sched_clone.wake_timeout(pid, wait_id);
+                        });
+                    }
                 }
             }
             ExecutionResult::Terminate => {
                 process.state = ProcessState::Terminated;
                 state.active_processes = state.active_processes.saturating_sub(1);
+                if let Some(observers) = state.process_monitors.remove(&process.id) {
+                    for obs_pid in observers {
+                        if let Some((mut obs_proc, obs_wait)) = state.waiting_processes.remove(&obs_pid) {
+                            if let Some(dst_reg) = obs_wait.dst_reg {
+                                let exit_val = process.entrypoint_return.clone().unwrap_or(Value::Nil);
+                                if let Some(frame) = obs_proc.frame_stack.last_mut() {
+                                    if dst_reg < frame.registers.len() {
+                                        frame.registers[dst_reg] = exit_val;
+                                    }
+                                    frame.pc += 1;
+                                }
+                            }
+                            obs_proc.state = ProcessState::Running;
+                            state.ready_queue.push_back(obs_proc);
+                        }
+                    }
+                }
             }
             ExecutionResult::Error(msg) => {
                 process.state = ProcessState::Terminated;

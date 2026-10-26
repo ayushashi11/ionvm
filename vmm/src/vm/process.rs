@@ -1,12 +1,37 @@
 use std::collections::VecDeque;
+use std::time::Duration;
 use crate::lang::types::Value;
 use crate::vm::frame::Frame;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum WaitReason {
+    AnyMessage,
+    SelectiveMessage {
+        tag: Option<String>,
+        from_pid: Option<usize>,
+    },
+    ProcessExit {
+        target_pid: usize,
+    },
+    NativeEvent {
+        event_id: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaitState {
+    pub wait_id: u64,
+    pub reason: WaitReason,
+    pub timeout: Option<Duration>,
+    pub dst_reg: Option<usize>,
+    pub timeout_val: Option<Value>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum ProcessState {
+    Ready,
     Running,
-    WaitingMessage,
-    WaitingIo,
+    Waiting(WaitState),
     Terminated,
 }
 

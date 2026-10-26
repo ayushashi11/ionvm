@@ -9,12 +9,12 @@ use crate::lang::{FunctionType, Object, Protection, Value, format_value_with_spe
 use crate::lang::types::{Function, NativeJitFn};
 use crate::vm::Scheduler;
 use crate::vm::frame::Frame;
-use crate::vm::process::Process;
+use crate::vm::process::{Process, WaitReason, WaitState};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ExecutionResult {
     Continue,
-    WaitMessage,
+    Wait(Box<WaitState>),
     Terminate,
     Error(String),
 }
@@ -1048,7 +1048,61 @@ fn op_receive<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         ctx.process.reductions = ctx.process.reductions.saturating_sub(1);
         become fetch_and_dispatch(ctx);
     } else {
-        ExecutionResult::WaitMessage
+        let frame = ctx.process.frame_stack.last().unwrap();
+        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+        let dst_reg = match &inst.operands[0] {
+            OperandType::Register(r) => Some(*r),
+            _ => None,
+        };
+        ExecutionResult::Wait(Box::new(WaitState {
+            wait_id: 0,
+            reason: WaitReason::AnyMessage,
+            timeout: None,
+            dst_reg,
+            timeout_val: None,
+        }))
+    }
+}
+
+fn op_receive_timeout<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
+    if let Some(msg) = ctx.process.mailbox.pop_front() {
+        let frame = ctx.process.frame_stack.last().unwrap();
+        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+        let dst = inst.operands[0].clone();
+        save_value_to_operand(ctx.process, &dst, msg);
+        ctx.process.frame_stack.last_mut().unwrap().pc += 1;
+        ctx.process.reductions = ctx.process.reductions.saturating_sub(1);
+        become fetch_and_dispatch(ctx);
+    } else {
+        let frame = ctx.process.frame_stack.last().unwrap();
+        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+        let dst_reg = match &inst.operands[0] {
+            OperandType::Register(r) => Some(*r),
+            _ => None,
+        };
+
+        let timeout_ms = match inst.operands.get(1) {
+            Some(OperandType::Constant(Value::Int(ms))) => (*ms).max(0) as u64,
+            Some(OperandType::Register(r)) => match ctx.process.frame_stack.last().unwrap().registers.get(*r) {
+                Some(Value::Int(ms)) => (*ms).max(0) as u64,
+                _ => 0,
+            },
+            _ => 0,
+        };
+
+        let timeout_val = inst.operands.get(2).and_then(|op| match op {
+            OperandType::Constant(val) => Some(val.clone()),
+            OperandType::Register(r) => ctx.process.frame_stack.last().unwrap().registers.get(*r).cloned(),
+            _ => None,
+        }).or(Some(Value::Nil));
+
+        ExecutionResult::Wait(Box::new(WaitState {
+            wait_id: 0,
+            reason: WaitReason::AnyMessage,
+            timeout: Some(std::time::Duration::from_millis(timeout_ms)),
+            dst_reg,
+            timeout_val,
+        }))
     }
 }
 
@@ -4668,4 +4722,5 @@ pub static DISPATCH_TABLE: [HandlerFn; OPCODE_COUNT] = [
     op_F_lt_CRR,      // 148: FLtCRR
     op_F_gt_RCR,      // 149: FGtRCR
     op_F_gt_CRR,      // 150: FGtCRR
+    op_receive_timeout, // 151: ReceiveTimeout
 ];

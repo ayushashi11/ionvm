@@ -190,9 +190,10 @@ pub enum Opcode {
     FLtCRR,
     FGtRCR,
     FGtCRR,
+    ReceiveTimeout,
 }
 
-pub const OPCODE_COUNT: usize = Opcode::FGtCRR as usize + 1;
+pub const OPCODE_COUNT: usize = Opcode::ReceiveTimeout as usize + 1;
 
 impl Opcode {
     pub fn as_str(&self) -> &'static str {
@@ -363,6 +364,7 @@ impl Opcode {
             Opcode::FLtCRR => "F_lt_CRR",
             Opcode::FGtRCR => "F_gt_RCR",
             Opcode::FGtCRR => "F_gt_CRR",
+            Opcode::ReceiveTimeout => "receive_timeout",
         }
     }
 
@@ -533,6 +535,7 @@ impl Opcode {
             "F_lt_CRR" => Some(Opcode::FLtCRR),
             "F_gt_RCR" => Some(Opcode::FGtRCR),
             "F_gt_CRR" => Some(Opcode::FGtCRR),
+            "receive_timeout" => Some(Opcode::ReceiveTimeout),
             _ => None,
         }
     }

@@ -1885,3 +1885,100 @@ fn test_closure_make_env_and_captured_execution() {
     assert!(res.is_ok(), "VM execution failed: {:?}", res);
     assert_eq!(vm.entrypoint_return(), Some(Value::Int(42)));
 }
+
+#[test]
+fn test_wait_state_receive_timeout_expiration() {
+    let main_fn = Function::new(
+        "main".to_string(),
+        vec![
+            Instruction::new(
+                Opcode::ReceiveTimeout,
+                vec![
+                    OperandType::Register(0),
+                    OperandType::Constant(Value::Int(50)),
+                    OperandType::Constant(Value::Int(999)),
+                ],
+            ),
+            Instruction::new(Opcode::Ret, vec![OperandType::Register(0)]),
+        ],
+        1,
+        0,
+        FunctionType::Regular,
+    );
+
+    let bc = Bytecode {
+        functions: vec![main_fn],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bc).expect("init vm");
+    let start = std::time::Instant::now();
+    let res = vm.run();
+    let elapsed = start.elapsed();
+    assert!(res.is_ok(), "VM execution failed: {:?}", res);
+    assert_eq!(vm.entrypoint_return(), Some(Value::Int(999)));
+    assert!(elapsed >= std::time::Duration::from_millis(40));
+}
+
+#[test]
+fn test_wait_state_receive_timeout_message_arrival() {
+    let sender_fn = Function::new(
+        "sender".to_string(),
+        vec![
+            Instruction::new(
+                Opcode::Send,
+                vec![
+                    OperandType::Constant(Value::Int(0)),
+                    OperandType::Constant(Value::Int(123)),
+                ],
+            ),
+            Instruction::new(Opcode::Ret, vec![OperandType::Constant(Value::Nil)]),
+        ],
+        1,
+        0,
+        FunctionType::Regular,
+    );
+
+    let main_fn = Function::new(
+        "main".to_string(),
+        vec![
+            Instruction::new(
+                Opcode::Spawn,
+                vec![
+                    OperandType::Function("sender".to_string()),
+                    OperandType::Offset(0),
+                    OperandType::Register(0),
+                ],
+            ),
+            Instruction::new(
+                Opcode::ReceiveTimeout,
+                vec![
+                    OperandType::Register(1),
+                    OperandType::Constant(Value::Int(1000)),
+                    OperandType::Constant(Value::Int(999)),
+                ],
+            ),
+            Instruction::new(Opcode::Ret, vec![OperandType::Register(1)]),
+        ],
+        2,
+        0,
+        FunctionType::Regular,
+    );
+
+    let bc = Bytecode {
+        functions: vec![main_fn, sender_fn],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bc).expect("init vm");
+    let start = std::time::Instant::now();
+    let res = vm.run();
+    let elapsed = start.elapsed();
+    assert!(res.is_ok(), "VM execution failed: {:?}", res);
+    assert_eq!(vm.entrypoint_return(), Some(Value::Int(123)));
+    assert!(elapsed < std::time::Duration::from_millis(800));
+}
