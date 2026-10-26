@@ -12,7 +12,7 @@ use crate::vm::frame::Frame;
 use crate::vm::process::{Process, ProcessState};
 pub use executor::ExecutionResult;
 
-pub const PROC_REDUCTIONS: usize = 50_000;
+pub const PROC_REDUCTIONS: usize = 2_000;
 
 pub struct SchedulerState {
     pub ready_queue: VecDeque<Process>,

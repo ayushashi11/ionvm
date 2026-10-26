@@ -161,10 +161,20 @@ impl FfiContext for VmFfiContext<'_> {
                 bytecode
                     .object_inits
                     .iter()
-                    .find(|(name, _)| name == enum_name || name.ends_with(&format!(".{enum_name}")))
+                    .find(|(name, _)| {
+                        name == enum_name
+                            || name == &format!("__ionvm.prelude.{enum_name}")
+                            || name.ends_with(&format!(".{enum_name}"))
+                    })
                     .map(|(name, _)| name.clone())
             })
-            .unwrap_or_else(|| enum_name.to_string());
+            .unwrap_or_else(|| {
+                if enum_name == "Option" || enum_name == "Result" {
+                    format!("__ionvm.prelude.{enum_name}")
+                } else {
+                    enum_name.to_string()
+                }
+            });
         let mut properties = HashMap::from([
             ("@".to_string(), FfiValue::String(compiled_name)),
             ("@@".to_string(), FfiValue::String(variant_name.to_string())),

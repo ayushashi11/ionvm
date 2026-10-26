@@ -143,7 +143,7 @@ pub fn make_option(bytecode: &Bytecode, value: Option<Value>) -> Value {
     let prototype = bytecode
         .object_inits
         .iter()
-        .find(|(name, _)| name.ends_with(".Option"))
+        .find(|(name, _)| name == "__ionvm.prelude.Option" || name.ends_with(".Option"))
         .map(|(_, prototype)| Arc::clone(prototype));
     let type_name = prototype
         .as_ref()
@@ -152,7 +152,7 @@ pub fn make_option(bytecode: &Bytecode, value: Option<Value>) -> Value {
             Value::String(name) => Some(name),
             _ => None,
         })
-        .unwrap_or_else(|| "Option".to_string());
+        .unwrap_or_else(|| "__ionvm.prelude.Option".to_string());
     let mut object = Object::new(prototype);
     object.set_property("@", Value::String(type_name), Protection::Readonly);
     object.set_property("@@", Value::String(variant.to_string()), Protection::Readonly);
@@ -160,5 +160,31 @@ pub fn make_option(bytecode: &Bytecode, value: Option<Value>) -> Value {
         object.set_property("@payload_0", payload.clone(), Protection::Writeable);
         object.set_property("0", payload, Protection::Writeable);
     }
+    Value::Object(Arc::new(RwLock::new(object)))
+}
+
+pub fn make_result(bytecode: &Bytecode, result: Result<Value, Value>) -> Value {
+    let (variant, payload) = match result {
+        Ok(value) => ("ok", value),
+        Err(error) => ("err", error),
+    };
+    let prototype = bytecode
+        .object_inits
+        .iter()
+        .find(|(name, _)| name == "__ionvm.prelude.Result" || name.ends_with(".Result"))
+        .map(|(_, prototype)| Arc::clone(prototype));
+    let type_name = prototype
+        .as_ref()
+        .and_then(|prototype| prototype.read().ok()?.get_property("@"))
+        .and_then(|tag| match tag {
+            Value::String(name) => Some(name),
+            _ => None,
+        })
+        .unwrap_or_else(|| "__ionvm.prelude.Result".to_string());
+    let mut object = Object::new(prototype);
+    object.set_property("@", Value::String(type_name), Protection::Readonly);
+    object.set_property("@@", Value::String(variant.to_string()), Protection::Readonly);
+    object.set_property("@payload_0", payload.clone(), Protection::Writeable);
+    object.set_property("0", payload, Protection::Writeable);
     Value::Object(Arc::new(RwLock::new(object)))
 }
