@@ -2,7 +2,7 @@ use inkwell::context::Context;
 use inkwell::execution_engine::ExecutionEngine;
 use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::passes::PassBuilderOptions;
-use inkwell::values::{FloatValue, IntValue, PointerValue};
+use inkwell::values::{FloatValue, IntValue, PointerValue, VectorValue};
 use inkwell::AddressSpace;
 use inkwell::{FloatPredicate, IntPredicate};
 use inkwell::OptimizationLevel;
@@ -241,6 +241,113 @@ pub unsafe extern "C" fn vm_array_set_float(val_ptr: *const Value, idx: i64, val
     }
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_str_eq(p1: *const Value, p2: *const Value) -> i64 {
+    if p1.is_null() || p2.is_null() {
+        return 0;
+    }
+    match (unsafe { &*p1 }, unsafe { &*p2 }) {
+        (Value::String(a), Value::String(b)) => if crate::vm::simd::simd_str_eq(a, b) { 1 } else { 0 },
+        (a, b) => if a.eql(b) { 1 } else { 0 },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_str_concat(p1: *const Value, p2: *const Value, dst: *mut Value) {
+    if p1.is_null() || p2.is_null() || dst.is_null() {
+        return;
+    }
+    let s1 = unsafe { &*p1 }.to_str();
+    let s2 = unsafe { &*p2 }.to_str();
+    let mut out = String::with_capacity(s1.len() + s2.len());
+    out.push_str(&s1);
+    out.push_str(&s2);
+    unsafe {
+        *dst = Value::String(out);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_str_find(haystack: *const Value, needle: *const Value) -> i64 {
+    if haystack.is_null() || needle.is_null() {
+        return -1;
+    }
+    match (unsafe { &*haystack }, unsafe { &*needle }) {
+        (Value::String(h), Value::String(n)) => {
+            crate::vm::simd::simd_str_find(h, n).map(|i| i as i64).unwrap_or(-1)
+        }
+        _ => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_str_count_byte(val: *const Value, byte: i64) -> i64 {
+    if val.is_null() {
+        return 0;
+    }
+    match unsafe { &*val } {
+        Value::String(s) => crate::vm::simd::simd_str_count_byte(s, byte as u8) as i64,
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_str_to_int(val: *const Value) -> i64 {
+    if val.is_null() {
+        return 0;
+    }
+    match unsafe { &*val } {
+        Value::String(s) => s.trim().parse::<i64>().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_str_upper(val: *const Value, dst: *mut Value) {
+    if val.is_null() || dst.is_null() {
+        return;
+    }
+    match unsafe { &*val } {
+        Value::String(s) => {
+            let mut owned = s.clone();
+            crate::vm::simd::simd_str_to_upper_mut(&mut owned);
+            unsafe { *dst = Value::String(owned); }
+        }
+        other => unsafe { *dst = other.clone(); },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_str_lower(val: *const Value, dst: *mut Value) {
+    if val.is_null() || dst.is_null() {
+        return;
+    }
+    match unsafe { &*val } {
+        Value::String(s) => {
+            let mut owned = s.clone();
+            crate::vm::simd::simd_str_to_lower_mut(&mut owned);
+            unsafe { *dst = Value::String(owned); }
+        }
+        other => unsafe { *dst = other.clone(); },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vm_str_slice(val: *const Value, start: i64, end: i64, dst: *mut Value) {
+    if val.is_null() || dst.is_null() {
+        return;
+    }
+    match unsafe { &*val } {
+        Value::String(s) => {
+            let s_len = s.len();
+            let start_idx = (start.max(0) as usize).min(s_len);
+            let end_idx = if end < 0 { s_len } else { (end.max(0) as usize).min(s_len).max(start_idx) };
+            unsafe { *dst = Value::String(s[start_idx..end_idx].to_string()); }
+        }
+        _ => unsafe { *dst = Value::String("".to_string()); },
+    }
+}
+
 pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     Target::initialize_native(&InitializationConfig::default()).ok()?;
 
@@ -311,6 +418,38 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     let get_intarray_len_fn = module.add_function("vm_get_intarray_len", get_intarray_len_fn_type, None);
     ee.add_global_mapping(&get_intarray_len_fn, vm_get_intarray_len as *const () as usize);
 
+    let str_eq_fn_type = i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+    let str_eq_fn = module.add_function("vm_str_eq", str_eq_fn_type, None);
+    ee.add_global_mapping(&str_eq_fn, vm_str_eq as *const () as usize);
+
+    let str_concat_fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+    let str_concat_fn = module.add_function("vm_str_concat", str_concat_fn_type, None);
+    ee.add_global_mapping(&str_concat_fn, vm_str_concat as *const () as usize);
+
+    let str_find_fn_type = i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+    let str_find_fn = module.add_function("vm_str_find", str_find_fn_type, None);
+    ee.add_global_mapping(&str_find_fn, vm_str_find as *const () as usize);
+
+    let str_count_byte_fn_type = i64_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+    let str_count_byte_fn = module.add_function("vm_str_count_byte", str_count_byte_fn_type, None);
+    ee.add_global_mapping(&str_count_byte_fn, vm_str_count_byte as *const () as usize);
+
+    let str_to_int_fn_type = i64_type.fn_type(&[ptr_type.into()], false);
+    let str_to_int_fn = module.add_function("vm_str_to_int", str_to_int_fn_type, None);
+    ee.add_global_mapping(&str_to_int_fn, vm_str_to_int as *const () as usize);
+
+    let str_upper_fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+    let str_upper_fn = module.add_function("vm_str_upper", str_upper_fn_type, None);
+    ee.add_global_mapping(&str_upper_fn, vm_str_upper as *const () as usize);
+
+    let str_lower_fn_type = void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+    let str_lower_fn = module.add_function("vm_str_lower", str_lower_fn_type, None);
+    ee.add_global_mapping(&str_lower_fn, vm_str_lower as *const () as usize);
+
+    let str_slice_fn_type = void_type.fn_type(&[ptr_type.into(), i64_type.into(), i64_type.into(), ptr_type.into()], false);
+    let str_slice_fn = module.add_function("vm_str_slice", str_slice_fn_type, None);
+    ee.add_global_mapping(&str_slice_fn, vm_str_slice as *const () as usize);
+
     let builder = context.create_builder();
     let entry_bb = context.append_basic_block(llvm_fn, "entry");
 
@@ -318,6 +457,44 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     let mut bbs = Vec::with_capacity(inst_count);
     for i in 0..inst_count {
         bbs.push(context.append_basic_block(llvm_fn, &format!("bb_{}", i)));
+    }
+
+    builder.position_at_end(entry_bb);
+    let v4i64_type = i64_type.vec_type(4);
+    let v4f64_type = f64_type.vec_type(4);
+    let i32_type = context.i32_type();
+
+    let has_vector_ops = func.instructions.iter().any(|inst| matches!(
+        inst.opcode,
+        Opcode::VIotaI | Opcode::VSplatI | Opcode::VSplatF
+        | Opcode::VAddI | Opcode::VSubI | Opcode::VMulI | Opcode::VSumI
+        | Opcode::VAddIC | Opcode::VSubIC | Opcode::VMulIC
+        | Opcode::VDivIC | Opcode::VRemIC | Opcode::VDivI | Opcode::VRemI | Opcode::VDivF
+        | Opcode::VCmpEqI | Opcode::VCmpGtI | Opcode::VCmpLtI | Opcode::VExtractI
+        | Opcode::VAddF | Opcode::VSubF | Opcode::VMulF | Opcode::VDotF | Opcode::VSumF
+        | Opcode::VGatherI
+    ));
+
+    let mut reg_val_allocas = Vec::with_capacity(func.register_count);
+    let mut reg_tag_allocas = Vec::with_capacity(func.register_count);
+    let mut reg_v4i_allocas = Vec::with_capacity(if has_vector_ops { func.register_count } else { 0 });
+    let mut reg_v4f_allocas = Vec::with_capacity(if has_vector_ops { func.register_count } else { 0 });
+    for r in 0..func.register_count {
+        let v_alloca = builder.build_alloca(i64_type, &format!("alloca_val_{}", r)).ok()?;
+        let t_alloca = builder.build_alloca(i8_type, &format!("alloca_tag_{}", r)).ok()?;
+        builder.build_store(v_alloca, i64_type.const_int(0, false)).ok()?;
+        builder.build_store(t_alloca, i8_type.const_int(6, false)).ok()?;
+        reg_val_allocas.push(v_alloca);
+        reg_tag_allocas.push(t_alloca);
+
+        if has_vector_ops {
+            let v4i_alloca = builder.build_alloca(v4i64_type, &format!("alloca_v4i_{}", r)).ok()?;
+            let v4f_alloca = builder.build_alloca(v4f64_type, &format!("alloca_v4f_{}", r)).ok()?;
+            builder.build_store(v4i_alloca, v4i64_type.const_zero()).ok()?;
+            builder.build_store(v4f_alloca, v4f64_type.const_zero()).ok()?;
+            reg_v4i_allocas.push(v4i_alloca);
+            reg_v4f_allocas.push(v4f_alloca);
+        }
     }
 
     let regs_param = llvm_fn.get_nth_param(0)?.into_pointer_value();
@@ -377,21 +554,32 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     };
 
     let get_reg_int = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize| -> Result<IntValue<'static>, inkwell::builder::BuilderError> {
-        let reg_ptr = get_reg_ptr(builder, reg_idx)?;
-        let int_offset = i64_type.const_int(8, false);
-        let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[int_offset], "val_ptr") }?;
-        let loaded = builder.build_load(i64_type, val_ptr, "reg_int")?;
-        Ok(loaded.into_int_value())
+        if reg_idx < reg_val_allocas.len() {
+            let loaded = builder.build_load(i64_type, reg_val_allocas[reg_idx], &format!("r{}_int", reg_idx))?;
+            Ok(loaded.into_int_value())
+        } else {
+            let reg_ptr = get_reg_ptr(builder, reg_idx)?;
+            let int_offset = i64_type.const_int(8, false);
+            let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[int_offset], "val_ptr") }?;
+            let loaded = builder.build_load(i64_type, val_ptr, "reg_int")?;
+            Ok(loaded.into_int_value())
+        }
     };
 
     let set_reg_int = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize, val: IntValue<'static>| -> Result<(), inkwell::builder::BuilderError> {
-        let reg_ptr = get_reg_ptr(builder, reg_idx)?;
-        let tag = i8_type.const_int(0, false);
-        builder.build_store(reg_ptr, tag)?;
-        let int_offset = i64_type.const_int(8, false);
-        let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[int_offset], "val_ptr") }?;
-        builder.build_store(val_ptr, val)?;
-        Ok(())
+        if reg_idx < reg_val_allocas.len() {
+            builder.build_store(reg_tag_allocas[reg_idx], i8_type.const_int(0, false))?;
+            builder.build_store(reg_val_allocas[reg_idx], val)?;
+            Ok(())
+        } else {
+            let reg_ptr = get_reg_ptr(builder, reg_idx)?;
+            let tag = i8_type.const_int(0, false);
+            builder.build_store(reg_ptr, tag)?;
+            let int_offset = i64_type.const_int(8, false);
+            let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[int_offset], "val_ptr") }?;
+            builder.build_store(val_ptr, val)?;
+            Ok(())
+        }
     };
 
     let get_arg_ptr = |builder: &inkwell::builder::Builder<'static>, arg_idx: usize| -> Result<PointerValue<'static>, inkwell::builder::BuilderError> {
@@ -409,31 +597,72 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
     };
 
     let get_reg_float = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize| -> Result<FloatValue<'static>, inkwell::builder::BuilderError> {
-        let reg_ptr = get_reg_ptr(builder, reg_idx)?;
-        let flt_offset = i64_type.const_int(8, false);
-        let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[flt_offset], "val_ptr") }?;
-        let loaded = builder.build_load(f64_type, val_ptr, "reg_float")?;
-        Ok(loaded.into_float_value())
+        if reg_idx < reg_val_allocas.len() {
+            let loaded = builder.build_load(i64_type, reg_val_allocas[reg_idx], &format!("r{}_flt_raw", reg_idx))?;
+            let flt = builder.build_bit_cast(loaded, f64_type, &format!("r{}_flt", reg_idx))?;
+            Ok(flt.into_float_value())
+        } else {
+            let reg_ptr = get_reg_ptr(builder, reg_idx)?;
+            let flt_offset = i64_type.const_int(8, false);
+            let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[flt_offset], "val_ptr") }?;
+            let loaded = builder.build_load(f64_type, val_ptr, "reg_float")?;
+            Ok(loaded.into_float_value())
+        }
     };
 
     let set_reg_float = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize, val: FloatValue<'static>| -> Result<(), inkwell::builder::BuilderError> {
-        let reg_ptr = get_reg_ptr(builder, reg_idx)?;
-        let tag = i8_type.const_int(1, false);
-        builder.build_store(reg_ptr, tag)?;
-        let flt_offset = i64_type.const_int(8, false);
-        let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[flt_offset], "val_ptr") }?;
-        builder.build_store(val_ptr, val)?;
-        Ok(())
+        if reg_idx < reg_val_allocas.len() {
+            builder.build_store(reg_tag_allocas[reg_idx], i8_type.const_int(1, false))?;
+            let raw_int = builder.build_bit_cast(val, i64_type, "flt_to_raw_int")?;
+            builder.build_store(reg_val_allocas[reg_idx], raw_int)?;
+            Ok(())
+        } else {
+            let reg_ptr = get_reg_ptr(builder, reg_idx)?;
+            let tag = i8_type.const_int(1, false);
+            builder.build_store(reg_ptr, tag)?;
+            let flt_offset = i64_type.const_int(8, false);
+            let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[flt_offset], "val_ptr") }?;
+            builder.build_store(val_ptr, val)?;
+            Ok(())
+        }
     };
 
     let set_reg_bool = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize, val: IntValue<'static>| -> Result<(), inkwell::builder::BuilderError> {
-        let reg_ptr = get_reg_ptr(builder, reg_idx)?;
-        let tag = i8_type.const_int(2, false);
-        builder.build_store(reg_ptr, tag)?;
-        let bool_offset = i64_type.const_int(8, false);
-        let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[bool_offset], "val_ptr") }?;
         let zext = builder.build_int_z_extend(val, i64_type, "bool_zext")?;
-        builder.build_store(val_ptr, zext)?;
+        if reg_idx < reg_val_allocas.len() {
+            builder.build_store(reg_tag_allocas[reg_idx], i8_type.const_int(2, false))?;
+            builder.build_store(reg_val_allocas[reg_idx], zext)?;
+            Ok(())
+        } else {
+            let reg_ptr = get_reg_ptr(builder, reg_idx)?;
+            let tag = i8_type.const_int(2, false);
+            builder.build_store(reg_ptr, tag)?;
+            let bool_offset = i64_type.const_int(8, false);
+            let val_ptr = unsafe { builder.build_gep(i8_type, reg_ptr, &[bool_offset], "val_ptr") }?;
+            builder.build_store(val_ptr, zext)?;
+            Ok(())
+        }
+    };
+
+    let get_reg_v4i = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize| -> Result<VectorValue<'static>, inkwell::builder::BuilderError> {
+        let loaded = builder.build_load(v4i64_type, reg_v4i_allocas[reg_idx], &format!("r{}_v4i", reg_idx))?;
+        Ok(loaded.into_vector_value())
+    };
+
+    let set_reg_v4i = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize, val: VectorValue<'static>| -> Result<(), inkwell::builder::BuilderError> {
+        builder.build_store(reg_tag_allocas[reg_idx], i8_type.const_int(10, false))?;
+        builder.build_store(reg_v4i_allocas[reg_idx], val)?;
+        Ok(())
+    };
+
+    let get_reg_v4f = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize| -> Result<VectorValue<'static>, inkwell::builder::BuilderError> {
+        let loaded = builder.build_load(v4f64_type, reg_v4f_allocas[reg_idx], &format!("r{}_v4f", reg_idx))?;
+        Ok(loaded.into_vector_value())
+    };
+
+    let set_reg_v4f = |builder: &inkwell::builder::Builder<'static>, reg_idx: usize, val: VectorValue<'static>| -> Result<(), inkwell::builder::BuilderError> {
+        builder.build_store(reg_tag_allocas[reg_idx], i8_type.const_int(11, false))?;
+        builder.build_store(reg_v4f_allocas[reg_idx], val)?;
         Ok(())
     };
 
@@ -499,7 +728,8 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
             | Opcode::IBitSet0
             | Opcode::ArrayGet
             | Opcode::AGetIndexAR
-            | Opcode::GetIndex => {
+            | Opcode::GetIndex
+            | Opcode::VGatherI => {
                 if let Some(op) = inst.operands.first() {
                     match op {
                         OperandType::Argument(a) => { int_array_args.insert(*a); }
@@ -730,26 +960,38 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                             set_reg_bool(&builder, dst, b_val).ok()?;
                         }
                         OperandType::Register(src) => {
-                            let src_ptr = get_reg_ptr(&builder, *src).ok()?;
-                            let dst_ptr = get_reg_ptr(&builder, dst).ok()?;
-                            let src_tag = builder.build_load(i8_type, src_ptr, "src_tag").ok()?;
-                            builder.build_store(dst_ptr, src_tag).ok()?;
-                            let val_offset = i64_type.const_int(8, false);
-                            let src_val_ptr = unsafe { builder.build_gep(i8_type, src_ptr, &[val_offset], "src_val_ptr") }.ok()?;
-                            let dst_val_ptr = unsafe { builder.build_gep(i8_type, dst_ptr, &[val_offset], "dst_val_ptr") }.ok()?;
-                            let val = builder.build_load(i64_type, src_val_ptr, "val").ok()?;
-                            builder.build_store(dst_val_ptr, val).ok()?;
+                            if *src < reg_val_allocas.len() && dst < reg_val_allocas.len() {
+                                let src_tag = builder.build_load(i8_type, reg_tag_allocas[*src], "src_tag").ok()?;
+                                builder.build_store(reg_tag_allocas[dst], src_tag).ok()?;
+                                let val = builder.build_load(i64_type, reg_val_allocas[*src], "val").ok()?;
+                                builder.build_store(reg_val_allocas[dst], val).ok()?;
+                            } else {
+                                let src_ptr = get_reg_ptr(&builder, *src).ok()?;
+                                let dst_ptr = get_reg_ptr(&builder, dst).ok()?;
+                                let src_tag = builder.build_load(i8_type, src_ptr, "src_tag").ok()?;
+                                builder.build_store(dst_ptr, src_tag).ok()?;
+                                let val_offset = i64_type.const_int(8, false);
+                                let src_val_ptr = unsafe { builder.build_gep(i8_type, src_ptr, &[val_offset], "src_val_ptr") }.ok()?;
+                                let dst_val_ptr = unsafe { builder.build_gep(i8_type, dst_ptr, &[val_offset], "dst_val_ptr") }.ok()?;
+                                let val = builder.build_load(i64_type, src_val_ptr, "val").ok()?;
+                                builder.build_store(dst_val_ptr, val).ok()?;
+                            }
                         }
                         OperandType::Argument(a) => {
                             let src_ptr = get_arg_ptr(&builder, *a).ok()?;
-                            let dst_ptr = get_reg_ptr(&builder, dst).ok()?;
                             let src_tag = builder.build_load(i8_type, src_ptr, "src_tag").ok()?;
-                            builder.build_store(dst_ptr, src_tag).ok()?;
                             let val_offset = i64_type.const_int(8, false);
                             let src_val_ptr = unsafe { builder.build_gep(i8_type, src_ptr, &[val_offset], "src_val_ptr") }.ok()?;
-                            let dst_val_ptr = unsafe { builder.build_gep(i8_type, dst_ptr, &[val_offset], "dst_val_ptr") }.ok()?;
                             let val = builder.build_load(i64_type, src_val_ptr, "val").ok()?;
-                            builder.build_store(dst_val_ptr, val).ok()?;
+                            if dst < reg_val_allocas.len() {
+                                builder.build_store(reg_tag_allocas[dst], src_tag).ok()?;
+                                builder.build_store(reg_val_allocas[dst], val).ok()?;
+                            } else {
+                                let dst_ptr = get_reg_ptr(&builder, dst).ok()?;
+                                builder.build_store(dst_ptr, src_tag).ok()?;
+                                let dst_val_ptr = unsafe { builder.build_gep(i8_type, dst_ptr, &[val_offset], "dst_val_ptr") }.ok()?;
+                                builder.build_store(dst_val_ptr, val).ok()?;
+                            }
                         }
                         OperandType::This => {
                             let dst_ptr = get_reg_ptr(&builder, dst).ok()?;
@@ -758,6 +1000,10 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                                 &[dst_ptr.into(), self_param.into()],
                                 "copy_this_to_reg",
                             ).ok()?;
+                            if dst < reg_tag_allocas.len() {
+                                let this_tag = builder.build_load(i8_type, self_param, "this_tag").ok()?;
+                                builder.build_store(reg_tag_allocas[dst], this_tag).ok()?;
+                            }
                         }
                         _ => {
                             let val = resolve_int(&builder, &ops[0]).ok()?;
@@ -767,15 +1013,22 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                 } else if let OperandType::Captured(cap_idx) = ops[1] {
                     match &ops[0] {
                         OperandType::Register(src) => {
-                            let src_ptr = get_reg_ptr(&builder, *src).ok()?;
-                            let src_tag = builder.build_load(i8_type, src_ptr, "src_tag").ok()?;
                             let cap_ptr = get_cap_ptr(&builder, cap_idx).ok()?;
-                            builder.build_store(cap_ptr, src_tag).ok()?;
                             let val_offset = i64_type.const_int(8, false);
-                            let src_val_ptr = unsafe { builder.build_gep(i8_type, src_ptr, &[val_offset], "src_val_ptr") }.ok()?;
                             let cap_val_ptr = unsafe { builder.build_gep(i8_type, cap_ptr, &[val_offset], "cap_val_ptr") }.ok()?;
-                            let val = builder.build_load(i64_type, src_val_ptr, "val").ok()?;
-                            builder.build_store(cap_val_ptr, val).ok()?;
+                            if *src < reg_val_allocas.len() {
+                                let src_tag = builder.build_load(i8_type, reg_tag_allocas[*src], "src_tag").ok()?;
+                                let val = builder.build_load(i64_type, reg_val_allocas[*src], "src_val").ok()?;
+                                builder.build_store(cap_ptr, src_tag).ok()?;
+                                builder.build_store(cap_val_ptr, val).ok()?;
+                            } else {
+                                let src_ptr = get_reg_ptr(&builder, *src).ok()?;
+                                let src_tag = builder.build_load(i8_type, src_ptr, "src_tag").ok()?;
+                                builder.build_store(cap_ptr, src_tag).ok()?;
+                                let src_val_ptr = unsafe { builder.build_gep(i8_type, src_ptr, &[val_offset], "src_val_ptr") }.ok()?;
+                                let val = builder.build_load(i64_type, src_val_ptr, "val").ok()?;
+                                builder.build_store(cap_val_ptr, val).ok()?;
+                            }
                         }
                         OperandType::This => {
                             let cap_ptr = get_cap_ptr(&builder, cap_idx).ok()?;
@@ -1476,7 +1729,85 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                             let _ = builder.build_store(out_res_param, tag);
                         }
                         OperandType::Register(r) => {
-                            if let Ok(reg_ptr) = get_reg_ptr(&builder, *r) {
+                            let reg_ptr = get_reg_ptr(&builder, *r).ok()?;
+                            if *r < reg_val_allocas.len() {
+                                let tag = builder.build_load(i8_type, reg_tag_allocas[*r], "ret_tag").ok()?.into_int_value();
+                                let scalar_ret_bb = context.append_basic_block(llvm_fn, "scalar_ret");
+                                let heap_ret_bb = context.append_basic_block(llvm_fn, "heap_ret");
+                                let ret_cont_bb = context.append_basic_block(llvm_fn, "ret_cont");
+
+                                if has_vector_ops {
+                                    let v4i_ret_bb = context.append_basic_block(llvm_fn, "v4i_ret");
+                                    let v4f_ret_bb = context.append_basic_block(llvm_fn, "v4f_ret");
+
+                                    let _ = builder.build_switch(
+                                        tag,
+                                        heap_ret_bb,
+                                        &[
+                                            (i8_type.const_int(0, false), scalar_ret_bb),
+                                            (i8_type.const_int(1, false), scalar_ret_bb),
+                                            (i8_type.const_int(2, false), scalar_ret_bb),
+                                            (i8_type.const_int(6, false), scalar_ret_bb),
+                                            (i8_type.const_int(10, false), v4i_ret_bb),
+                                            (i8_type.const_int(11, false), v4f_ret_bb),
+                                        ],
+                                    );
+
+                                    // v4i_ret_bb:
+                                    builder.position_at_end(v4i_ret_bb);
+                                    let _ = builder.build_store(out_res_param, tag);
+                                    let val_offset = i64_type.const_int(8, false);
+                                    if let Ok(val_ptr) = unsafe { builder.build_gep(i8_type, out_res_param, &[val_offset], "out_v4i_ptr") } {
+                                        if let Ok(v4i_val) = builder.build_load(v4i64_type, reg_v4i_allocas[*r], "ret_v4i") {
+                                            let _ = builder.build_store(val_ptr, v4i_val);
+                                        }
+                                    }
+                                    let _ = builder.build_unconditional_branch(ret_cont_bb);
+
+                                    // v4f_ret_bb:
+                                    builder.position_at_end(v4f_ret_bb);
+                                    let _ = builder.build_store(out_res_param, tag);
+                                    if let Ok(val_ptr) = unsafe { builder.build_gep(i8_type, out_res_param, &[val_offset], "out_v4f_ptr") } {
+                                        if let Ok(v4f_val) = builder.build_load(v4f64_type, reg_v4f_allocas[*r], "ret_v4f") {
+                                            let _ = builder.build_store(val_ptr, v4f_val);
+                                        }
+                                    }
+                                    let _ = builder.build_unconditional_branch(ret_cont_bb);
+                                } else {
+                                    let _ = builder.build_switch(
+                                        tag,
+                                        heap_ret_bb,
+                                        &[
+                                            (i8_type.const_int(0, false), scalar_ret_bb),
+                                            (i8_type.const_int(1, false), scalar_ret_bb),
+                                            (i8_type.const_int(2, false), scalar_ret_bb),
+                                            (i8_type.const_int(6, false), scalar_ret_bb),
+                                        ],
+                                    );
+                                }
+
+                                // scalar_ret_bb:
+                                builder.position_at_end(scalar_ret_bb);
+                                let _ = builder.build_store(out_res_param, tag);
+                                let val_offset = i64_type.const_int(8, false);
+                                if let Ok(val_ptr) = unsafe { builder.build_gep(i8_type, out_res_param, &[val_offset], "out_val_ptr") } {
+                                    if let Ok(val) = builder.build_load(i64_type, reg_val_allocas[*r], "ret_val") {
+                                        let _ = builder.build_store(val_ptr, val);
+                                    }
+                                }
+                                let _ = builder.build_unconditional_branch(ret_cont_bb);
+
+                                // heap_ret_bb:
+                                builder.position_at_end(heap_ret_bb);
+                                let _ = builder.build_call(
+                                    copy_value_fn,
+                                    &[out_res_param.into(), reg_ptr.into()],
+                                    "copy_heap_register_return",
+                                );
+                                let _ = builder.build_unconditional_branch(ret_cont_bb);
+
+                                builder.position_at_end(ret_cont_bb);
+                            } else {
                                 let _ = builder.build_call(
                                     copy_value_fn,
                                     &[out_res_param.into(), reg_ptr.into()],
@@ -1892,6 +2223,756 @@ pub fn compile_with_llvm_ir(func: &Function) -> Option<(NativeJitFn, String)> {
                     }
                 } else {
                     return None;
+                }
+            }
+            Opcode::VIotaI => {
+                let start_val = resolve_int(&builder, &ops[0]).ok()?;
+                let c0 = start_val;
+                let c1 = builder.build_int_add(c0, i64_type.const_int(1, false), "iota1").ok()?;
+                let c2 = builder.build_int_add(c0, i64_type.const_int(2, false), "iota2").ok()?;
+                let c3 = builder.build_int_add(c0, i64_type.const_int(3, false), "iota3").ok()?;
+                let undef = v4i64_type.get_undef();
+                let v0 = builder.build_insert_element(undef, c0, i32_type.const_int(0, false), "v0").ok()?;
+                let v1 = builder.build_insert_element(v0, c1, i32_type.const_int(1, false), "v1").ok()?;
+                let v2 = builder.build_insert_element(v1, c2, i32_type.const_int(2, false), "v2").ok()?;
+                let v3 = builder.build_insert_element(v2, c3, i32_type.const_int(3, false), "v3").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, v3).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VSplatI => {
+                let val = resolve_int(&builder, &ops[0]).ok()?;
+                let undef = v4i64_type.get_undef();
+                let v0 = builder.build_insert_element(undef, val, i32_type.const_int(0, false), "s0").ok()?;
+                let v1 = builder.build_insert_element(v0, val, i32_type.const_int(1, false), "s1").ok()?;
+                let v2 = builder.build_insert_element(v1, val, i32_type.const_int(2, false), "s2").ok()?;
+                let v3 = builder.build_insert_element(v2, val, i32_type.const_int(3, false), "s3").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, v3).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VSplatF => {
+                let val = resolve_float(&builder, &ops[0]).ok()?;
+                let undef = v4f64_type.get_undef();
+                let v0 = builder.build_insert_element(undef, val, i32_type.const_int(0, false), "sf0").ok()?;
+                let v1 = builder.build_insert_element(v0, val, i32_type.const_int(1, false), "sf1").ok()?;
+                let v2 = builder.build_insert_element(v1, val, i32_type.const_int(2, false), "sf2").ok()?;
+                let v3 = builder.build_insert_element(v2, val, i32_type.const_int(3, false), "sf3").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4f(&builder, dst, v3).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VAddI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_int_add(v1, v2, "vadd_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VSubI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_int_sub(v1, v2, "vsub_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VMulI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_int_mul(v1, v2, "vmul_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VAddIC => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let c_val = match &ops[1] {
+                    OperandType::Constant(Value::Int(c)) => i64_type.const_int(*c as u64, true),
+                    _ => resolve_int(&builder, &ops[1]).ok()?,
+                };
+                let undef = v4i64_type.get_undef();
+                let s0 = builder.build_insert_element(undef, c_val, i32_type.const_int(0, false), "c0").ok()?;
+                let s1 = builder.build_insert_element(s0, c_val, i32_type.const_int(1, false), "c1").ok()?;
+                let s2 = builder.build_insert_element(s1, c_val, i32_type.const_int(2, false), "c2").ok()?;
+                let s3 = builder.build_insert_element(s2, c_val, i32_type.const_int(3, false), "c3").ok()?;
+                let res = builder.build_int_add(v1, s3, "vaddic_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VSubIC => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let c_val = match &ops[1] {
+                    OperandType::Constant(Value::Int(c)) => i64_type.const_int(*c as u64, true),
+                    _ => resolve_int(&builder, &ops[1]).ok()?,
+                };
+                let undef = v4i64_type.get_undef();
+                let s0 = builder.build_insert_element(undef, c_val, i32_type.const_int(0, false), "c0").ok()?;
+                let s1 = builder.build_insert_element(s0, c_val, i32_type.const_int(1, false), "c1").ok()?;
+                let s2 = builder.build_insert_element(s1, c_val, i32_type.const_int(2, false), "c2").ok()?;
+                let s3 = builder.build_insert_element(s2, c_val, i32_type.const_int(3, false), "c3").ok()?;
+                let res = builder.build_int_sub(v1, s3, "vsubic_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VMulIC => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let c_val = match &ops[1] {
+                    OperandType::Constant(Value::Int(c)) => i64_type.const_int(*c as u64, true),
+                    _ => resolve_int(&builder, &ops[1]).ok()?,
+                };
+                let undef = v4i64_type.get_undef();
+                let s0 = builder.build_insert_element(undef, c_val, i32_type.const_int(0, false), "c0").ok()?;
+                let s1 = builder.build_insert_element(s0, c_val, i32_type.const_int(1, false), "c1").ok()?;
+                let s2 = builder.build_insert_element(s1, c_val, i32_type.const_int(2, false), "c2").ok()?;
+                let s3 = builder.build_insert_element(s2, c_val, i32_type.const_int(3, false), "c3").ok()?;
+                let res = builder.build_int_mul(v1, s3, "vmulic_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VDivIC => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let c_val = match &ops[1] {
+                    OperandType::Constant(Value::Int(c)) => i64_type.const_int(*c as u64, true),
+                    _ => resolve_int(&builder, &ops[1]).ok()?,
+                };
+                let undef = v4i64_type.get_undef();
+                let s0 = builder.build_insert_element(undef, c_val, i32_type.const_int(0, false), "c0").ok()?;
+                let s1 = builder.build_insert_element(s0, c_val, i32_type.const_int(1, false), "c1").ok()?;
+                let s2 = builder.build_insert_element(s1, c_val, i32_type.const_int(2, false), "c2").ok()?;
+                let s3 = builder.build_insert_element(s2, c_val, i32_type.const_int(3, false), "c3").ok()?;
+                let res = builder.build_int_unsigned_div(v1, s3, "vdivic_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VRemIC => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let c_val = match &ops[1] {
+                    OperandType::Constant(Value::Int(c)) => i64_type.const_int(*c as u64, true),
+                    _ => resolve_int(&builder, &ops[1]).ok()?,
+                };
+                let undef = v4i64_type.get_undef();
+                let s0 = builder.build_insert_element(undef, c_val, i32_type.const_int(0, false), "c0").ok()?;
+                let s1 = builder.build_insert_element(s0, c_val, i32_type.const_int(1, false), "c1").ok()?;
+                let s2 = builder.build_insert_element(s1, c_val, i32_type.const_int(2, false), "c2").ok()?;
+                let s3 = builder.build_insert_element(s2, c_val, i32_type.const_int(3, false), "c3").ok()?;
+                let res = builder.build_int_unsigned_rem(v1, s3, "vremic_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VDivI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_int_unsigned_div(v1, v2, "vdivi_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VRemI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_int_unsigned_rem(v1, v2, "vremi_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VCmpEqI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let cmp = builder.build_int_compare(IntPredicate::EQ, v1, v2, "vcmpeq_tmp").ok()?;
+                let res = builder.build_int_z_extend(cmp, v4i64_type, "vcmpeq_zext").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VCmpGtI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let cmp = builder.build_int_compare(IntPredicate::SGT, v1, v2, "vcmpgt_tmp").ok()?;
+                let res = builder.build_int_z_extend(cmp, v4i64_type, "vcmpgt_zext").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VCmpLtI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let cmp = builder.build_int_compare(IntPredicate::SLT, v1, v2, "vcmplt_tmp").ok()?;
+                let res = builder.build_int_z_extend(cmp, v4i64_type, "vcmplt_zext").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VExtractI => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let lane = match &ops[1] {
+                    OperandType::Constant(Value::Int(c)) => i32_type.const_int(*c as u64, false),
+                    _ => {
+                        let lane_i64 = resolve_int(&builder, &ops[1]).ok()?;
+                        builder.build_int_truncate(lane_i64, i32_type, "lane_trunc").ok()?
+                    }
+                };
+                let extracted = builder.build_extract_element(v1, lane, "vextract_tmp").ok()?.into_int_value();
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_int(&builder, dst, extracted).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VAddF => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_float_add(v1, v2, "vfadd_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4f(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VSubF => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_float_sub(v1, v2, "vfsub_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4f(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VMulF => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_float_mul(v1, v2, "vfmul_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4f(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VDivF => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let res = builder.build_float_div(v1, v2, "vfdiv_tmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4f(&builder, dst, res).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VDotF => {
+                let v1 = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let v2 = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let prod = builder.build_float_mul(v1, v2, "vfdot_mul").ok()?;
+                let e0 = builder.build_extract_element(prod, i32_type.const_int(0, false), "d0").ok()?.into_float_value();
+                let e1 = builder.build_extract_element(prod, i32_type.const_int(1, false), "d1").ok()?.into_float_value();
+                let e2 = builder.build_extract_element(prod, i32_type.const_int(2, false), "d2").ok()?.into_float_value();
+                let e3 = builder.build_extract_element(prod, i32_type.const_int(3, false), "d3").ok()?.into_float_value();
+                let s01 = builder.build_float_add(e0, e1, "ds01").ok()?;
+                let s23 = builder.build_float_add(e2, e3, "ds23").ok()?;
+                let sum = builder.build_float_add(s01, s23, "dot_sum").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_float(&builder, dst, sum).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VSumF => {
+                let v = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4f(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let e0 = builder.build_extract_element(v, i32_type.const_int(0, false), "e0").ok()?.into_float_value();
+                let e1 = builder.build_extract_element(v, i32_type.const_int(1, false), "e1").ok()?.into_float_value();
+                let e2 = builder.build_extract_element(v, i32_type.const_int(2, false), "e2").ok()?.into_float_value();
+                let e3 = builder.build_extract_element(v, i32_type.const_int(3, false), "e3").ok()?.into_float_value();
+                let s01 = builder.build_float_add(e0, e1, "fs01").ok()?;
+                let s23 = builder.build_float_add(e2, e3, "fs23").ok()?;
+                let sum = builder.build_float_add(s01, s23, "sum_flt").ok()?;
+                if let OperandType::Register(dst) = ops[1] {
+                    set_reg_float(&builder, dst, sum).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VSumI => {
+                let v = match ops[0] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let e0 = builder.build_extract_element(v, i32_type.const_int(0, false), "ie0").ok()?.into_int_value();
+                let e1 = builder.build_extract_element(v, i32_type.const_int(1, false), "ie1").ok()?.into_int_value();
+                let e2 = builder.build_extract_element(v, i32_type.const_int(2, false), "ie2").ok()?.into_int_value();
+                let e3 = builder.build_extract_element(v, i32_type.const_int(3, false), "ie3").ok()?.into_int_value();
+                let s01 = builder.build_int_add(e0, e1, "is01").ok()?;
+                let s23 = builder.build_int_add(e2, e3, "is23").ok()?;
+                let sum = builder.build_int_add(s01, s23, "sum_int").ok()?;
+                if let OperandType::Register(dst) = ops[1] {
+                    set_reg_int(&builder, dst, sum).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::VGatherI => {
+                let idx_vec = match ops[1] {
+                    OperandType::Register(r) => get_reg_v4i(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let i0 = builder.build_extract_element(idx_vec, i32_type.const_int(0, false), "gi0").ok()?.into_int_value();
+                let i1 = builder.build_extract_element(idx_vec, i32_type.const_int(1, false), "gi1").ok()?.into_int_value();
+                let i2 = builder.build_extract_element(idx_vec, i32_type.const_int(2, false), "gi2").ok()?.into_int_value();
+                let i3 = builder.build_extract_element(idx_vec, i32_type.const_int(3, false), "gi3").ok()?.into_int_value();
+
+                let arg_idx = match ops[0] {
+                    OperandType::Argument(a) => Some(a),
+                    OperandType::Register(r) => reg_to_arg.get(&r).copied(),
+                    _ => None,
+                };
+
+                let (val0, val1, val2, val3) = if let Some(a) = arg_idx.filter(|a| arg_int_ptrs.contains_key(a)) {
+                    let data_ptr = arg_int_ptrs[&a];
+                    let p0 = unsafe { builder.build_gep(i64_type, data_ptr, &[i0], "gp0") }.ok()?;
+                    let p1 = unsafe { builder.build_gep(i64_type, data_ptr, &[i1], "gp1") }.ok()?;
+                    let p2 = unsafe { builder.build_gep(i64_type, data_ptr, &[i2], "gp2") }.ok()?;
+                    let p3 = unsafe { builder.build_gep(i64_type, data_ptr, &[i3], "gp3") }.ok()?;
+                    let v0 = builder.build_load(i64_type, p0, "gv0").ok()?.into_int_value();
+                    let v1 = builder.build_load(i64_type, p1, "gv1").ok()?.into_int_value();
+                    let v2 = builder.build_load(i64_type, p2, "gv2").ok()?.into_int_value();
+                    let v3 = builder.build_load(i64_type, p3, "gv3").ok()?.into_int_value();
+                    (v0, v1, v2, v3)
+                } else {
+                    let arr_ptr = match ops[0] {
+                        OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                        OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                        OperandType::This => self_param,
+                        _ => get_arg_ptr(&builder, 0).ok()?,
+                    };
+                    let call0 = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), i0.into()], "c0").ok()?;
+                    let c0 = match call0.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                        _ => return None,
+                    };
+                    let call1 = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), i1.into()], "c1").ok()?;
+                    let c1 = match call1.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                        _ => return None,
+                    };
+                    let call2 = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), i2.into()], "c2").ok()?;
+                    let c2 = match call2.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                        _ => return None,
+                    };
+                    let call3 = builder.build_call(arr_get_int_fn, &[arr_ptr.into(), i3.into()], "c3").ok()?;
+                    let c3 = match call3.try_as_basic_value() {
+                        inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                        _ => return None,
+                    };
+                    (c0, c1, c2, c3)
+                };
+
+                let undef = v4i64_type.get_undef();
+                let r0 = builder.build_insert_element(undef, val0, i32_type.const_int(0, false), "gr0").ok()?;
+                let r1 = builder.build_insert_element(r0, val1, i32_type.const_int(1, false), "gr1").ok()?;
+                let r2 = builder.build_insert_element(r1, val2, i32_type.const_int(2, false), "gr2").ok()?;
+                let r3 = builder.build_insert_element(r2, val3, i32_type.const_int(3, false), "gr3").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_v4i(&builder, dst, r3).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SEqRRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let p1 = match ops[1] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let call_res = builder.build_call(str_eq_fn, &[p0.into(), p1.into()], "str_eq_call").ok()?;
+                let res_val = match call_res.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                    _ => return None,
+                };
+                let cmp = builder.build_int_compare(IntPredicate::NE, res_val, i64_type.const_int(0, false), "bool_cmp").ok()?;
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_bool(&builder, dst, cmp).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SConcatRRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let p1 = match ops[1] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let dst_ptr = match ops[2] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    _ => return None,
+                };
+                builder.build_call(str_concat_fn, &[p0.into(), p1.into(), dst_ptr.into()], "str_concat_call").ok()?;
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SFindRRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let p1 = match ops[1] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let call_res = builder.build_call(str_find_fn, &[p0.into(), p1.into()], "str_find_call").ok()?;
+                let res_val = match call_res.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                    _ => return None,
+                };
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_int(&builder, dst, res_val).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SCountByteRRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let byte_val = resolve_int(&builder, &ops[1]).ok()?;
+                let call_res = builder.build_call(str_count_byte_fn, &[p0.into(), byte_val.into()], "str_count_call").ok()?;
+                let res_val = match call_res.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                    _ => return None,
+                };
+                if let OperandType::Register(dst) = ops[2] {
+                    set_reg_int(&builder, dst, res_val).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SToIntRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let call_res = builder.build_call(str_to_int_fn, &[p0.into()], "str_to_int_call").ok()?;
+                let res_val = match call_res.try_as_basic_value() {
+                    inkwell::values::ValueKind::Basic(b) => b.into_int_value(),
+                    _ => return None,
+                };
+                if let OperandType::Register(dst) = ops[1] {
+                    set_reg_int(&builder, dst, res_val).ok()?;
+                }
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SUpperRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let dst_ptr = match ops[1] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    _ => return None,
+                };
+                builder.build_call(str_upper_fn, &[p0.into(), dst_ptr.into()], "str_upper_call").ok()?;
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SLowerRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let dst_ptr = match ops[1] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    _ => return None,
+                };
+                builder.build_call(str_lower_fn, &[p0.into(), dst_ptr.into()], "str_lower_call").ok()?;
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SSliceRRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let start_val = resolve_int(&builder, &ops[1]).ok()?;
+                let dst_ptr = match ops[2] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    _ => return None,
+                };
+                let minus_one = i64_type.const_int(!0, true);
+                builder.build_call(str_slice_fn, &[p0.into(), start_val.into(), minus_one.into(), dst_ptr.into()], "str_slice_call").ok()?;
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
+                }
+            }
+            Opcode::SSliceRRRR => {
+                let p0 = match ops[0] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    OperandType::Argument(a) => get_arg_ptr(&builder, a).ok()?,
+                    _ => return None,
+                };
+                let start_val = resolve_int(&builder, &ops[1]).ok()?;
+                let end_val = resolve_int(&builder, &ops[2]).ok()?;
+                let dst_ptr = match ops[3] {
+                    OperandType::Register(r) => get_reg_ptr(&builder, r).ok()?,
+                    _ => return None,
+                };
+                builder.build_call(str_slice_fn, &[p0.into(), start_val.into(), end_val.into(), dst_ptr.into()], "str_slice_call").ok()?;
+                if i + 1 < inst_count {
+                    let _ = builder.build_unconditional_branch(bbs[i + 1]);
+                } else {
+                    let _ = builder.build_return(None);
                 }
             }
             _ => {

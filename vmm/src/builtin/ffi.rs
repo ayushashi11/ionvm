@@ -41,6 +41,9 @@ impl ToFfiValue for Value {
                     FfiValue::Array(vec![])
                 }
             }
+            Value::V4Int(arr) => FfiValue::Array(arr.iter().map(|&i| FfiValue::Integer(i)).collect()),
+            Value::V4Float(arr) => FfiValue::Array(arr.iter().map(|&f| FfiValue::Float(f)).collect()),
+            Value::V4Bool(arr) => FfiValue::Array(arr.iter().map(|&b| FfiValue::Boolean(b)).collect()),
             Value::Object(obj) => {
                 let mut map = HashMap::new();
                 if let Ok(b) = obj.read() {

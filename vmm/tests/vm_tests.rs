@@ -1982,3 +1982,206 @@ fn test_wait_state_receive_timeout_message_arrival() {
     assert_eq!(vm.entrypoint_return(), Some(Value::Int(123)));
     assert!(elapsed < std::time::Duration::from_millis(800));
 }
+
+#[test]
+fn test_v4_lane_simd_execution() {
+    use vmm::bytecode::instruction::{Bytecode, Instruction, OperandType};
+    use vmm::bytecode::opcode::Opcode;
+    use vmm::lang::types::{Function, FunctionType, Value};
+    use vmm::vm::IonVM;
+
+    let instructions = vec![
+        // r0 = VIotaI(0, 4) -> Value::V4Int([0, 1, 2, 3])
+        Instruction::new(
+            Opcode::VIotaI,
+            vec![
+                OperandType::Constant(Value::Int(0)),
+                OperandType::Constant(Value::Int(4)),
+                OperandType::Register(0),
+            ],
+        ),
+        // r1 = VAddIC(r0, 10) -> Value::V4Int([10, 11, 12, 13])
+        Instruction::new(
+            Opcode::VAddIC,
+            vec![
+                OperandType::Register(0),
+                OperandType::Constant(Value::Int(10)),
+                OperandType::Register(1),
+            ],
+        ),
+        // r2 = VSplatI(5, 4) -> Value::V4Int([5, 5, 5, 5])
+        Instruction::new(
+            Opcode::VSplatI,
+            vec![
+                OperandType::Constant(Value::Int(5)),
+                OperandType::Constant(Value::Int(4)),
+                OperandType::Register(2),
+            ],
+        ),
+        // r3 = VAddI(r1, r2) -> Value::V4Int([15, 16, 17, 18])
+        Instruction::new(
+            Opcode::VAddI,
+            vec![
+                OperandType::Register(1),
+                OperandType::Register(2),
+                OperandType::Register(3),
+            ],
+        ),
+        // r4 = VSumI(r3) -> 15 + 16 + 17 + 18 = 66
+        Instruction::new(
+            Opcode::VSumI,
+            vec![OperandType::Register(3), OperandType::Register(4)],
+        ),
+        // r5 = VSplatF(2.5, 4) -> Value::V4Float([2.5, 2.5, 2.5, 2.5])
+        Instruction::new(
+            Opcode::VSplatF,
+            vec![
+                OperandType::Constant(Value::Float(2.5)),
+                OperandType::Constant(Value::Int(4)),
+                OperandType::Register(5),
+            ],
+        ),
+        // r6 = VAddF(r5, r5) -> Value::V4Float([5.0, 5.0, 5.0, 5.0])
+        Instruction::new(
+            Opcode::VAddF,
+            vec![
+                OperandType::Register(5),
+                OperandType::Register(5),
+                OperandType::Register(6),
+            ],
+        ),
+        // r7 = VDotF(r5, r6) -> 4 * (2.5 * 5.0) = 50.0
+        Instruction::new(
+            Opcode::VDotF,
+            vec![
+                OperandType::Register(5),
+                OperandType::Register(6),
+                OperandType::Register(7),
+            ],
+        ),
+        // r8 = VSumF(r6) -> 20.0
+        Instruction::new(
+            Opcode::VSumF,
+            vec![OperandType::Register(6), OperandType::Register(8)],
+        ),
+        Instruction::new(Opcode::Ret, vec![OperandType::Register(4)]),
+    ];
+
+    let main_fn = Function::new("main".to_string(), instructions, 10, 0, FunctionType::Regular);
+    let bc = Bytecode {
+        functions: vec![main_fn],
+        entry_point: "main".to_string(),
+        native_declarations: vec![],
+        object_inits: vec![],
+    };
+
+    let mut vm = IonVM::new(bc).expect("init vm");
+    let res = vm.run();
+    assert!(res.is_ok(), "Lane SIMD execution failed: {:?}", res);
+    assert_eq!(vm.entrypoint_return(), Some(Value::Int(66)));
+}
+
+#[test]
+fn test_llvm_jit_simd_vector_and_string_execution() {
+    // 1. Test Lane SIMD operations lowered to LLVM vector instructions
+    let vector_instructions = vec![
+        // r0 = VIotaI(arg0) -> Value::V4Int([arg0, arg0+1, arg0+2, arg0+3])
+        Instruction::new(
+            Opcode::VIotaI,
+            vec![
+                OperandType::Argument(0),
+                OperandType::Constant(Value::Int(4)),
+                OperandType::Register(0),
+            ],
+        ),
+        // r1 = VAddIC(r0, 10) -> Value::V4Int([arg0+10, arg0+11, arg0+12, arg0+13])
+        Instruction::new(
+            Opcode::VAddIC,
+            vec![
+                OperandType::Register(0),
+                OperandType::Constant(Value::Int(10)),
+                OperandType::Register(1),
+            ],
+        ),
+        // r2 = VSplatI(5) -> Value::V4Int([5, 5, 5, 5])
+        Instruction::new(
+            Opcode::VSplatI,
+            vec![
+                OperandType::Constant(Value::Int(5)),
+                OperandType::Constant(Value::Int(4)),
+                OperandType::Register(2),
+            ],
+        ),
+        // r3 = VAddI(r1, r2)
+        Instruction::new(
+            Opcode::VAddI,
+            vec![
+                OperandType::Register(1),
+                OperandType::Register(2),
+                OperandType::Register(3),
+            ],
+        ),
+        // r4 = VSumI(r3)
+        Instruction::new(
+            Opcode::VSumI,
+            vec![OperandType::Register(3), OperandType::Register(4)],
+        ),
+        Instruction::new(Opcode::Ret, vec![OperandType::Register(4)]),
+    ];
+
+    let vec_fn = Function::new("test_vec_simd".to_string(), vector_instructions, 6, 1, FunctionType::Regular);
+    let (jit_vec_fn, ir) = compile_function_with_ir(&vec_fn).expect("JIT compile SIMD vector function");
+
+    // Verify LLVM IR contains vector type
+    assert!(ir.contains("<4 x i64>"), "LLVM IR must contain vector type <4 x i64>, got: {}", ir);
+
+    let mut registers = vec![Value::Nil; 6];
+    let mut result = Value::Nil;
+    let undefined_self: *mut Value = std::ptr::null_mut();
+    // arg0 = 0 -> r0 = [0, 1, 2, 3], r1 = [10, 11, 12, 13], r2 = [5, 5, 5, 5], r3 = [15, 16, 17, 18], r4 = 66
+    let args = vec![Value::Int(0)];
+    unsafe {
+        jit_vec_fn(registers.as_mut_ptr(), undefined_self, args.as_ptr(), std::ptr::null_mut(), &mut result as *mut Value);
+    }
+    assert_eq!(result, Value::Int(66));
+
+    // 2. Test String SIMD operations lowered to LLVM C-helpers
+    let string_instructions = vec![
+        // r0 = SConcatRRR(arg0, arg1)
+        Instruction::new(
+            Opcode::SConcatRRR,
+            vec![
+                OperandType::Argument(0),
+                OperandType::Argument(1),
+                OperandType::Register(0),
+            ],
+        ),
+        // r1 = SCountByteRRR(r0, 'l' as i64 = 108)
+        Instruction::new(
+            Opcode::SCountByteRRR,
+            vec![
+                OperandType::Register(0),
+                OperandType::Constant(Value::Int(108)),
+                OperandType::Register(1),
+            ],
+        ),
+        Instruction::new(Opcode::Ret, vec![OperandType::Register(1)]),
+    ];
+
+    let str_fn = Function::new("test_str_simd".to_string(), string_instructions, 3, 2, FunctionType::Regular);
+    let (jit_str_fn, str_ir) = compile_function_with_ir(&str_fn).expect("JIT compile SIMD string function");
+
+    assert!(str_ir.contains("@vm_str_concat") && str_ir.contains("@vm_str_count_byte"), "LLVM IR must call string helpers");
+
+    let mut str_registers = vec![Value::Nil; 3];
+    let mut str_result = Value::Nil;
+    let str_args = vec![
+        Value::String("hello ".to_string()),
+        Value::String("world!".to_string()),
+    ];
+    unsafe {
+        jit_str_fn(str_registers.as_mut_ptr(), undefined_self, str_args.as_ptr(), std::ptr::null_mut(), &mut str_result as *mut Value);
+    }
+    // "hello world!" has three 'l's
+    assert_eq!(str_result, Value::Int(3));
+}

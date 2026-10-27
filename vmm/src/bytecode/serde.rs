@@ -296,6 +296,24 @@ pub fn write_value<W: Write>(w: &mut W, val: &Value) -> Result<(), SerError> {
                 write_f64(w, *item)?;
             }
         }
+        Value::V4Int(arr) => {
+            write_string(w, "v4int")?;
+            for item in arr.iter() {
+                write_i64(w, *item)?;
+            }
+        }
+        Value::V4Float(arr) => {
+            write_string(w, "v4float")?;
+            for item in arr.iter() {
+                write_f64(w, *item)?;
+            }
+        }
+        Value::V4Bool(arr) => {
+            write_string(w, "v4bool")?;
+            for item in arr.iter() {
+                write_bool(w, *item)?;
+            }
+        }
     }
     Ok(())
 }
@@ -342,6 +360,27 @@ pub fn read_value<R: Read>(r: &mut R) -> Result<Value, SerError> {
                 items.push(read_f64(r)?);
             }
             Ok(Value::FloatArray(Arc::new(RwLock::new(items))))
+        }
+        "v4int" => {
+            let mut arr = [0i64; 4];
+            for i in 0..4 {
+                arr[i] = read_i64(r)?;
+            }
+            Ok(Value::V4Int(arr))
+        }
+        "v4float" => {
+            let mut arr = [0.0f64; 4];
+            for i in 0..4 {
+                arr[i] = read_f64(r)?;
+            }
+            Ok(Value::V4Float(arr))
+        }
+        "v4bool" => {
+            let mut arr = [false; 4];
+            for i in 0..4 {
+                arr[i] = read_bool(r)?;
+            }
+            Ok(Value::V4Bool(arr))
         }
         _ => Err(SerError::InvalidTag(tag)),
     }

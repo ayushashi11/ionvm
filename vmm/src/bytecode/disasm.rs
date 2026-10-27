@@ -262,6 +262,9 @@ fn print_pattern_value<W: Write>(w: &mut W, value: &Value) -> io::Result<()> {
         Value::Array(values) => write!(w, "array(len={})", values.read().unwrap().len()),
         Value::IntArray(values) => write!(w, "int_array(len={})", values.read().unwrap().len()),
         Value::FloatArray(values) => write!(w, "float_array(len={})", values.read().unwrap().len()),
+        Value::V4Int(values) => write!(w, "v4int({:?})", values),
+        Value::V4Float(values) => write!(w, "v4float({:?})", values),
+        Value::V4Bool(values) => write!(w, "v4bool({:?})", values),
     }
 }
 

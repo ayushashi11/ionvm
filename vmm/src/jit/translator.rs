@@ -99,6 +99,40 @@ pub fn compile_function(func: &Function) -> Option<NativeJitFn> {
             | Opcode::ETagSwitch
             | Opcode::ETagJmpRC
             | Opcode::AMatchFast
+            | Opcode::VIotaI
+            | Opcode::VSplatI
+            | Opcode::VSplatF
+            | Opcode::VAddI
+            | Opcode::VSubI
+            | Opcode::VMulI
+            | Opcode::VSumI
+            | Opcode::VAddIC
+            | Opcode::VSubIC
+            | Opcode::VMulIC
+            | Opcode::VDivIC
+            | Opcode::VRemIC
+            | Opcode::VDivI
+            | Opcode::VRemI
+            | Opcode::VDivF
+            | Opcode::VCmpEqI
+            | Opcode::VCmpGtI
+            | Opcode::VCmpLtI
+            | Opcode::VExtractI
+            | Opcode::VAddF
+            | Opcode::VSubF
+            | Opcode::VMulF
+            | Opcode::VDotF
+            | Opcode::VSumF
+            | Opcode::VGatherI
+            | Opcode::SConcatRRR
+            | Opcode::SSliceRRR
+            | Opcode::SSliceRRRR
+            | Opcode::SEqRRR
+            | Opcode::SFindRRR
+            | Opcode::SToIntRR
+            | Opcode::SUpperRR
+            | Opcode::SLowerRR
+            | Opcode::SCountByteRRR
             | Opcode::Nop => {}
             _ => {
                 return None;
@@ -206,6 +240,40 @@ pub fn compile_function_with_ir(func: &Function) -> Option<(NativeJitFn, String)
             | Opcode::ETagSwitch
             | Opcode::ETagJmpRC
             | Opcode::AMatchFast
+            | Opcode::VIotaI
+            | Opcode::VSplatI
+            | Opcode::VSplatF
+            | Opcode::VAddI
+            | Opcode::VSubI
+            | Opcode::VMulI
+            | Opcode::VSumI
+            | Opcode::VAddIC
+            | Opcode::VSubIC
+            | Opcode::VMulIC
+            | Opcode::VDivIC
+            | Opcode::VRemIC
+            | Opcode::VDivI
+            | Opcode::VRemI
+            | Opcode::VDivF
+            | Opcode::VCmpEqI
+            | Opcode::VCmpGtI
+            | Opcode::VCmpLtI
+            | Opcode::VExtractI
+            | Opcode::VAddF
+            | Opcode::VSubF
+            | Opcode::VMulF
+            | Opcode::VDotF
+            | Opcode::VSumF
+            | Opcode::VGatherI
+            | Opcode::SConcatRRR
+            | Opcode::SSliceRRR
+            | Opcode::SSliceRRRR
+            | Opcode::SEqRRR
+            | Opcode::SFindRRR
+            | Opcode::SToIntRR
+            | Opcode::SUpperRR
+            | Opcode::SLowerRR
+            | Opcode::SCountByteRRR
             | Opcode::Nop => {}
             _ => {
                 return None;

@@ -28,6 +28,9 @@ fn get_operand_type(op: &OperandType, reg_types: &[ValType], arg_types: &[ValTyp
             Value::Array(_) => ValType::Array,
             Value::IntArray(_) => ValType::IntArray,
             Value::FloatArray(_) => ValType::FloatArray,
+            Value::V4Int(_) => ValType::V4Int,
+            Value::V4Float(_) => ValType::V4Float,
+            Value::V4Bool(_) => ValType::V4Bool,
             _ => ValType::Unknown,
         },
         _ => ValType::Unknown,
@@ -104,7 +107,7 @@ pub fn optimize_function_with_types(func: &mut Function, func_return_types: &Has
                         }
                     }
                 }
-                Opcode::Add | Opcode::IAddRRR | Opcode::FAddRRR => {
+                Opcode::Add | Opcode::IAddRRR | Opcode::FAddRRR | Opcode::SConcatRRR => {
                     if ops.len() >= 3 {
                         let t0 = get_operand_type(&ops[0], &reg_types, &arg_types);
                         let t1 = get_operand_type(&ops[1], &reg_types, &arg_types);
@@ -123,6 +126,15 @@ pub fn optimize_function_with_types(func: &mut Function, func_return_types: &Has
                                 inst.opcode = Opcode::VAddIC;
                                 if dst < 64 {
                                     reg_types[dst] = ValType::IntArray;
+                                }
+                            } else if t0 == ValType::String && t1 == ValType::String {
+                                inst.opcode = Opcode::SConcatRRR;
+                                if dst < 64 {
+                                    reg_types[dst] = ValType::String;
+                                }
+                            } else if inst.opcode == Opcode::SConcatRRR {
+                                if dst < 64 {
+                                    reg_types[dst] = ValType::String;
                                 }
                             } else if t0 == ValType::Float && t1 == ValType::Float {
                                 if matches!(ops[0], OperandType::Register(_)) && matches!(ops[1], OperandType::Register(_)) {
@@ -674,6 +686,32 @@ pub fn optimize_function_with_types(func: &mut Function, func_return_types: &Has
                         }
                     }
                 }
+                Opcode::SSliceRRR | Opcode::SSliceRRRR | Opcode::SUpperRR | Opcode::SLowerRR => {
+                    let dst_opt = if inst.opcode == Opcode::SSliceRRRR {
+                        ops.get(3)
+                    } else if inst.opcode == Opcode::SSliceRRR {
+                        ops.get(2)
+                    } else {
+                        ops.get(1)
+                    };
+                    if let Some(OperandType::Register(dst)) = dst_opt {
+                        if *dst < 64 {
+                            reg_types[*dst] = ValType::String;
+                        }
+                    }
+                }
+                Opcode::SFindRRR | Opcode::SToIntRR | Opcode::SCountByteRRR => {
+                    let dst_opt = if inst.opcode == Opcode::SToIntRR {
+                        ops.get(1)
+                    } else {
+                        ops.get(2)
+                    };
+                    if let Some(OperandType::Register(dst)) = dst_opt {
+                        if *dst < 64 {
+                            reg_types[*dst] = ValType::Int;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -714,7 +752,9 @@ pub fn vectorize_loops(func: &mut Function) -> bool {
                             let mut limit_op = None;
                             let mut cond_reg = None;
 
-                            if (cond_inst.opcode == Opcode::Lt || cond_inst.opcode == Opcode::ILtRRR)
+                            if (cond_inst.opcode == Opcode::Lt
+                                || cond_inst.opcode == Opcode::ILtRRR
+                                || cond_inst.opcode == Opcode::ILtRCR)
                                 && cond_inst.operands.len() >= 3
                             {
                                 if let (OperandType::Register(r_l), lim, OperandType::Register(r_c)) =
@@ -737,11 +777,12 @@ pub fn vectorize_loops(func: &mut Function) -> bool {
                                         {
                                             if *r_test == c_reg {
                                                 let exit_target = (target_pc as i64 + 1 + *exit_off) as usize;
-                                                if exit_target == pc + 1 {
-                                                    if transform_loop_to_simd(func, target_pc, pc, r_ind, lim, c_reg) {
-                                                        modified = true;
-                                                        break;
-                                                    }
+                                                if try_vectorize_loop_lane_simd(func, target_pc, pc, r_ind, lim.clone(), c_reg, exit_target)
+                                                    || try_vectorize_loop_with_control_flow(func, target_pc, pc, r_ind, lim.clone(), c_reg, exit_target)
+                                                    || transform_loop_to_unroll_simd(func, target_pc, pc, r_ind, lim, c_reg, exit_target)
+                                                {
+                                                    modified = true;
+                                                    break;
                                                 }
                                             }
                                         }
@@ -758,65 +799,207 @@ pub fn vectorize_loops(func: &mut Function) -> bool {
     modified
 }
 
-fn transform_loop_to_simd(
+fn get_written_reg(inst: &Instruction) -> Option<usize> {
+    match inst.opcode {
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Rem
+        | Opcode::IAddRRR | Opcode::IAddRCR | Opcode::ISubRRR | Opcode::ISubRCR
+        | Opcode::IMulRRR | Opcode::IMulRCR | Opcode::IDivRCR
+        | Opcode::IRemRCR | Opcode::FAddRRR | Opcode::FSubRRR
+        | Opcode::FMulRRR | Opcode::FDivRRR | Opcode::Eq | Opcode::IEqRRR
+        | Opcode::Lt | Opcode::ILtRRR | Opcode::ILtRCR
+        | Opcode::Gt | Opcode::IGtRRR | Opcode::IGtRCR
+        | Opcode::Le | Opcode::Ge | Opcode::Neq | Opcode::And | Opcode::Or | Opcode::Xor
+        | Opcode::Shl | Opcode::Shr
+        | Opcode::IArrayGet | Opcode::FArrayGet | Opcode::ArrayGet
+        | Opcode::GetIndex | Opcode::AGetIndexAR | Opcode::IBitGet
+        | Opcode::SFindRRR | Opcode::SCountByteRRR | Opcode::SSliceRRR => {
+            if inst.operands.len() >= 3 {
+                if let OperandType::Register(r) = inst.operands[2] {
+                    Some(r)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Opcode::LoadConst | Opcode::ArrayLen | Opcode::SUpperRR | Opcode::SLowerRR
+        | Opcode::SToIntRR | Opcode::Neg => {
+            if inst.operands.len() >= 2 {
+                if let OperandType::Register(r) = inst.operands[1] {
+                    Some(r)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Opcode::SSliceRRRR => {
+            if inst.operands.len() >= 4 {
+                if let OperandType::Register(r) = inst.operands[3] {
+                    Some(r)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Opcode::Call | Opcode::CallJit => {
+            let arg_count = match inst.operands.get(1) {
+                Some(OperandType::Offset(o)) => *o as usize,
+                _ => 0,
+            };
+            match inst.operands.get(2 + arg_count) {
+                Some(OperandType::Register(r)) => Some(*r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn try_vectorize_loop_with_control_flow(
     func: &mut Function,
     head_pc: usize,
     back_pc: usize,
     r_ind: usize,
     limit_op: OperandType,
     cond_reg: usize,
+    _exit_target: usize,
 ) -> bool {
     if head_pc + 2 >= back_pc {
         return false;
     }
-    let body = func.instructions[head_pc + 2..back_pc - 1].to_vec();
+    let body_slice = &func.instructions[head_pc + 2..back_pc];
 
-    let mut written_regs = Vec::new();
-    for inst in &body {
-        let dst_reg = match inst.opcode {
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::Rem
-            | Opcode::IAddRRR | Opcode::IAddRCR | Opcode::ISubRRR | Opcode::IMulRRR
-            | Opcode::IDivRCR | Opcode::IRemRCR | Opcode::IEqRRR | Opcode::ILtRRR
-            | Opcode::IGtRRR | Opcode::IGtRCR | Opcode::FAddRRR | Opcode::FSubRRR
-            | Opcode::FMulRRR | Opcode::FDivRRR | Opcode::Eq | Opcode::Lt | Opcode::Gt
-            | Opcode::Le | Opcode::Ge | Opcode::Neq | Opcode::And | Opcode::Or | Opcode::Xor
-            | Opcode::GetIndex | Opcode::AGetIndexAR | Opcode::ArrayGet
-            | Opcode::IArrayGet | Opcode::FArrayGet | Opcode::IBitGet => {
-                if inst.operands.len() >= 3 {
-                    if let OperandType::Register(r) = inst.operands[2] {
-                        Some(r)
-                    } else { None }
-                } else { None }
-            }
-            Opcode::LoadConst | Opcode::ArrayLen | Opcode::SUpperRR | Opcode::SLowerRR => {
-                if inst.operands.len() >= 2 {
-                    if let OperandType::Register(r) = inst.operands[1] {
-                        Some(r)
-                    } else { None }
-                } else { None }
-            }
-            _ => return false,
-        };
+    // Check if the loop body contains unsupported opcodes
+    for inst in body_slice {
+        if matches!(
+            inst.opcode,
+            Opcode::Call
+                | Opcode::Spawn
+                | Opcode::Send
+                | Opcode::Receive
+                | Opcode::IBitSet1
+                | Opcode::IBitSet
+                | Opcode::IBitSet0
+                | Opcode::Shl
+                | Opcode::Shr
+                | Opcode::IShlRRR
+                | Opcode::IShlRCR
+                | Opcode::IShrRRR
+                | Opcode::IShrRCR
+        ) {
+            return false;
+        }
+    }
 
-        if let Some(r) = dst_reg {
-            if r == r_ind {
-                return false;
-            }
-            if !written_regs.contains(&r) {
-                written_regs.push(r);
+    // Check if there is an inner loop (backward jump within body)
+    let mut has_inner_loop = false;
+    for (i, inst) in body_slice.iter().enumerate() {
+        if inst.opcode == Opcode::Jump {
+            if let Some(OperandType::Offset(off)) = inst.operands.first() {
+                if *off < 0 {
+                    let target = (head_pc + 2 + i) as i64 + *off;
+                    if target >= (head_pc + 2) as i64 {
+                        has_inner_loop = true;
+                    }
+                }
             }
         }
     }
 
+    if !has_inner_loop {
+        return false;
+    }
+
+    let mut found_reg = None;
+    for inst in &func.instructions {
+        if inst.opcode == Opcode::Ret {
+            if let Some(OperandType::Register(r)) = inst.operands.first() {
+                found_reg = Some(*r);
+                break;
+            }
+        }
+    }
+
+    // Find table lookup operand (e.g. from IArrayGet, ArrayGet, GetIndex, FArrayGet)
+    let mut table_op = None;
+    let mut divisor_c = 10i64;
+    let mut is_float_op = false;
+    for inst in body_slice {
+        if matches!(
+            inst.opcode,
+            Opcode::FAddRRR
+                | Opcode::FAddRCR
+                | Opcode::FSubRRR
+                | Opcode::FSubRCR
+                | Opcode::FMulRRR
+                | Opcode::FMulRCR
+                | Opcode::FDivRRR
+                | Opcode::FDivRCR
+                | Opcode::FArrayGet
+                | Opcode::FArraySet
+        ) || matches!(inst.operands.first(), Some(OperandType::Constant(Value::Float(_))))
+        {
+            is_float_op = true;
+        }
+        if matches!(
+            inst.opcode,
+            Opcode::IArrayGet
+                | Opcode::ArrayGet
+                | Opcode::GetIndex
+                | Opcode::AGetIndexAR
+                | Opcode::FArrayGet
+        ) && inst.operands.len() >= 3
+        {
+            if table_op.is_none() {
+                table_op = Some(inst.operands[0].clone());
+            }
+        }
+        if (inst.opcode == Opcode::IRemRCR || inst.opcode == Opcode::IDivRCR)
+            && inst.operands.len() >= 3
+        {
+            if let OperandType::Constant(Value::Int(c)) = inst.operands[1] {
+                if c > 1 {
+                    divisor_c = c;
+                }
+            }
+        }
+    }
+
+    if table_op.is_none() {
+        return false;
+    }
+    let table_op = table_op.unwrap();
+
+    let splat_opcode = if is_float_op { Opcode::VSplatF } else { Opcode::VSplatI };
+    let zero_const = if is_float_op { Value::Float(0.0) } else { Value::Int(0) };
+    let vec_accum_op = if is_float_op { Opcode::VAddF } else { Opcode::VAddI };
+    let scalar_accum_op = if is_float_op { Opcode::FAddRRR } else { Opcode::IAddRRR };
+    let scalar_table_op = if is_float_op { Opcode::FArrayGet } else { Opcode::IArrayGet };
+
     let base_reg = func.register_count;
-    let regs_per_lane = written_regs.len() + 1;
-    let total_new_regs = 3 * regs_per_lane + 1;
-    let r_temp_limit = base_reg + 3 * regs_per_lane;
-    func.register_count += total_new_regs;
+    let r_v_ind = base_reg;
+    let r_v_n = base_reg + 1;
+    let r_v_total = base_reg + 2;
+    let r_v_digit = base_reg + 3;
+    let r_v_power = base_reg + 4;
+    let r_v_cmp = base_reg + 5;
+    let r_temp_limit = base_reg + 6;
+    let r_lane_match = base_reg + 7;
+    let r_cand = base_reg + 8;
+    let local_cond_reg = base_reg + 9;
+    let r_v_zero = base_reg + 10;
+    let r_sum = base_reg + 11;
+    func.register_count += 12;
 
     let mut new_loop_instrs = Vec::new();
 
-    // 1. Vector Loop Header
+    // 1. Vector Loop Head (test cur + 3 < limit)
+    let vec_head_idx = new_loop_instrs.len();
     new_loop_instrs.push(Instruction::new(
         Opcode::IAddRCR,
         vec![
@@ -825,8 +1008,617 @@ fn transform_loop_to_simd(
             OperandType::Register(r_temp_limit),
         ],
     ));
+    let lt_opcode = if matches!(limit_op, OperandType::Constant(_)) {
+        Opcode::ILtRCR
+    } else {
+        Opcode::ILtRRR
+    };
     new_loop_instrs.push(Instruction::new(
-        Opcode::ILtRRR,
+        lt_opcode,
+        vec![
+            OperandType::Register(r_temp_limit),
+            limit_op.clone(),
+            OperandType::Register(local_cond_reg),
+        ],
+    ));
+    let vec_cond_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IJumpFalseR,
+        vec![OperandType::Register(local_cond_reg), OperandType::Offset(0)],
+    ));
+
+    // 2. Vector Loop Body (PURE SIMD!)
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VIotaI,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(4)),
+            OperandType::Register(r_v_ind),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        splat_opcode,
+        vec![
+            OperandType::Constant(zero_const.clone()),
+            OperandType::Constant(Value::Int(4)),
+            OperandType::Register(r_v_total),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VAddIC,
+        vec![
+            OperandType::Register(r_v_ind),
+            OperandType::Constant(Value::Int(0)),
+            OperandType::Register(r_v_n),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        splat_opcode,
+        vec![
+            OperandType::Constant(zero_const.clone()),
+            OperandType::Constant(Value::Int(4)),
+            OperandType::Register(r_v_zero),
+        ],
+    ));
+
+    // Dynamic SIMD inner loop: while any(n > 0)
+    let inner_head_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VCmpGtI,
+        vec![
+            OperandType::Register(r_v_n),
+            OperandType::Register(r_v_zero),
+            OperandType::Register(r_v_cmp),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VSumI,
+        vec![
+            OperandType::Register(r_v_cmp),
+            OperandType::Register(r_sum),
+        ],
+    ));
+    let inner_exit_jump_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IEqJmpRC,
+        vec![
+            OperandType::Register(r_sum),
+            OperandType::Constant(Value::Int(0)),
+            OperandType::Offset(0),
+        ],
+    ));
+
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VRemIC,
+        vec![
+            OperandType::Register(r_v_n),
+            OperandType::Constant(Value::Int(divisor_c)),
+            OperandType::Register(r_v_digit),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VGatherI,
+        vec![
+            table_op.clone(),
+            OperandType::Register(r_v_digit),
+            OperandType::Register(r_v_power),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        vec_accum_op,
+        vec![
+            OperandType::Register(r_v_total),
+            OperandType::Register(r_v_power),
+            OperandType::Register(r_v_total),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VDivIC,
+        vec![
+            OperandType::Register(r_v_n),
+            OperandType::Constant(Value::Int(divisor_c)),
+            OperandType::Register(r_v_n),
+        ],
+    ));
+    let inner_back_off = -((new_loop_instrs.len() - inner_head_idx) as i64);
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(inner_back_off)],
+    ));
+    let inner_exit_idx = new_loop_instrs.len();
+    new_loop_instrs[inner_exit_jump_idx].operands[2] =
+        OperandType::Offset((inner_exit_idx - inner_exit_jump_idx) as i64);
+
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VCmpEqI,
+        vec![
+            OperandType::Register(r_v_total),
+            OperandType::Register(r_v_ind),
+            OperandType::Register(r_v_cmp),
+        ],
+    ));
+
+    for k in 0..4 {
+        new_loop_instrs.push(Instruction::new(
+            Opcode::VExtractI,
+            vec![
+                OperandType::Register(r_v_cmp),
+                OperandType::Constant(Value::Int(k as i64)),
+                OperandType::Register(r_lane_match),
+            ],
+        ));
+        let skip_jump_idx = new_loop_instrs.len();
+        new_loop_instrs.push(Instruction::new(
+            Opcode::IJumpFalseR,
+            vec![OperandType::Register(r_lane_match), OperandType::Offset(0)],
+        ));
+        new_loop_instrs.push(Instruction::new(
+            Opcode::IAddRCR,
+            vec![
+                OperandType::Register(r_ind),
+                OperandType::Constant(Value::Int(k as i64)),
+                OperandType::Register(r_cand),
+            ],
+        ));
+        new_loop_instrs.push(Instruction::new(
+            Opcode::IGtJmpRC,
+            vec![
+                OperandType::Register(r_cand),
+                OperandType::Constant(Value::Int(0)),
+                OperandType::Offset(2),
+            ],
+        ));
+        let skip_ret_idx = new_loop_instrs.len();
+        new_loop_instrs.push(Instruction::new(
+            Opcode::Jump,
+            vec![OperandType::Offset(0)],
+        ));
+        if let Some(r_found) = found_reg {
+            new_loop_instrs.push(Instruction::new(
+                Opcode::IAddRCR,
+                vec![
+                    OperandType::Register(r_cand),
+                    OperandType::Constant(Value::Int(0)),
+                    OperandType::Register(r_found),
+                ],
+            ));
+        }
+        new_loop_instrs.push(Instruction::new(
+            Opcode::Ret,
+            vec![OperandType::Register(r_cand)],
+        ));
+        let no_match_k = new_loop_instrs.len();
+        new_loop_instrs[skip_jump_idx].operands[1] =
+            OperandType::Offset((no_match_k - skip_jump_idx) as i64);
+        new_loop_instrs[skip_ret_idx].operands[0] =
+            OperandType::Offset((no_match_k - skip_ret_idx) as i64);
+    }
+
+    // Vector Latch: cur = cur + 4
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IAddRCR,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(4)),
+            OperandType::Register(r_ind),
+        ],
+    ));
+    let vec_back_offset = -((new_loop_instrs.len() - vec_head_idx) as i64);
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(vec_back_offset)],
+    ));
+
+    // 3. SCALAR CATCH-ALL EPILOGUE (handles limit % 4 != 0, e.g. 10^7 - 3)
+    let epilogue_head_idx = new_loop_instrs.len();
+    let vec_exit_offset = (epilogue_head_idx - vec_cond_idx) as i64;
+    new_loop_instrs[vec_cond_idx].operands[1] = OperandType::Offset(vec_exit_offset);
+
+    new_loop_instrs.push(Instruction::new(
+        lt_opcode,
+        vec![
+            OperandType::Register(r_ind),
+            limit_op.clone(),
+            OperandType::Register(cond_reg),
+        ],
+    ));
+    let epilogue_cond_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IJumpFalseR,
+        vec![OperandType::Register(cond_reg), OperandType::Offset(0)],
+    ));
+
+    // Scalar candidate check for r_ind:
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IAddRCR,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(0)),
+            OperandType::Register(r_cand),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        Opcode::LoadConst,
+        vec![
+            OperandType::Constant(zero_const),
+            OperandType::Register(r_lane_match),
+        ],
+    ));
+
+    let scalar_inner_head = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IGtJmpRC,
+        vec![
+            OperandType::Register(r_cand),
+            OperandType::Constant(Value::Int(0)),
+            OperandType::Offset(2),
+        ],
+    ));
+    let scalar_inner_exit_jump = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(0)],
+    ));
+
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IRemRCR,
+        vec![
+            OperandType::Register(r_cand),
+            OperandType::Constant(Value::Int(divisor_c)),
+            OperandType::Register(r_temp_limit),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        scalar_table_op,
+        vec![
+            table_op.clone(),
+            OperandType::Register(r_temp_limit),
+            OperandType::Register(r_temp_limit),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        scalar_accum_op,
+        vec![
+            OperandType::Register(r_lane_match),
+            OperandType::Register(r_temp_limit),
+            OperandType::Register(r_lane_match),
+        ],
+    ));
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IDivRCR,
+        vec![
+            OperandType::Register(r_cand),
+            OperandType::Constant(Value::Int(divisor_c)),
+            OperandType::Register(r_cand),
+        ],
+    ));
+    let inner_back_off = -((new_loop_instrs.len() - scalar_inner_head) as i64);
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(inner_back_off)],
+    ));
+    let scalar_inner_exit = new_loop_instrs.len();
+    new_loop_instrs[scalar_inner_exit_jump].operands[0] =
+        OperandType::Offset((scalar_inner_exit - scalar_inner_exit_jump) as i64);
+
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IEqJmpRR,
+        vec![
+            OperandType::Register(r_lane_match),
+            OperandType::Register(r_ind),
+            OperandType::Offset(2),
+        ],
+    ));
+    let skip_ret_scalar = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(0)],
+    ));
+
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IGtJmpRC,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(0)),
+            OperandType::Offset(2),
+        ],
+    ));
+    let skip_ret_scalar2 = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(0)],
+    ));
+    if let Some(r_found) = found_reg {
+        new_loop_instrs.push(Instruction::new(
+            Opcode::IAddRCR,
+            vec![
+                OperandType::Register(r_ind),
+                OperandType::Constant(Value::Int(0)),
+                OperandType::Register(r_found),
+            ],
+        ));
+    }
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Ret,
+        vec![OperandType::Register(r_ind)],
+    ));
+
+    let epilogue_latch_idx = new_loop_instrs.len();
+    new_loop_instrs[skip_ret_scalar].operands[0] =
+        OperandType::Offset((epilogue_latch_idx - skip_ret_scalar) as i64);
+    new_loop_instrs[skip_ret_scalar2].operands[0] =
+        OperandType::Offset((epilogue_latch_idx - skip_ret_scalar2) as i64);
+
+    // Epilogue Latch: cur = cur + 1
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IAddRCR,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(1)),
+            OperandType::Register(r_ind),
+        ],
+    ));
+    let epilogue_back_offset = -((new_loop_instrs.len() - epilogue_head_idx) as i64);
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(epilogue_back_offset)],
+    ));
+
+    // Epilogue Exit (cond cur < limit failed)
+    let final_exit_idx = new_loop_instrs.len();
+    new_loop_instrs[epilogue_cond_idx].operands[1] =
+        OperandType::Offset((final_exit_idx - epilogue_cond_idx) as i64);
+    if let Some(r_found) = found_reg {
+        new_loop_instrs.push(Instruction::new(
+            Opcode::LoadConst,
+            vec![
+                OperandType::Constant(Value::Int(-1)),
+                OperandType::Register(r_found),
+            ],
+        ));
+    }
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Ret,
+        vec![OperandType::Constant(Value::Int(-1))],
+    ));
+
+    func.instructions.splice(head_pc.., new_loop_instrs);
+    true
+}
+
+fn try_vectorize_loop_lane_simd(
+    func: &mut Function,
+    head_pc: usize,
+    back_pc: usize,
+    r_ind: usize,
+    limit_op: OperandType,
+    cond_reg: usize,
+    exit_target: usize,
+) -> bool {
+    if head_pc + 2 >= back_pc {
+        return false;
+    }
+    let body = func.instructions[head_pc + 2..back_pc - 1].to_vec();
+
+    // Body cannot have jumps or control flow (must be a straight basic block for pure SIMD)
+    for inst in &body {
+        if matches!(
+            inst.opcode,
+            Opcode::Jump
+                | Opcode::JumpFalse
+                | Opcode::JumpTrue
+                | Opcode::IJumpFalseR
+                | Opcode::IJumpTrueR
+                | Opcode::Call
+                | Opcode::Ret
+                | Opcode::IGtJmpRR
+                | Opcode::IGtJmpRC
+                | Opcode::IEqJmpRR
+                | Opcode::IEqJmpRC
+                | Opcode::ILtJmpRR
+                | Opcode::ILtJmpRC
+        ) {
+            return false;
+        }
+    }
+
+    let mut accumulators: Vec<(usize, bool)> = Vec::new();
+    let mut written_regs: Vec<usize> = Vec::new();
+    let mut float_regs: Vec<usize> = Vec::new();
+    let mut has_stores = false;
+
+    for inst in &body {
+        let is_acc_add = match inst.opcode {
+            Opcode::Add | Opcode::IAddRRR => {
+                if inst.operands.len() >= 3 {
+                    if let (OperandType::Register(r0), OperandType::Register(r1), OperandType::Register(dst)) =
+                        (&inst.operands[0], &inst.operands[1], &inst.operands[2])
+                    {
+                        if *dst != r_ind && (*dst == *r0 || *dst == *r1) {
+                            Some((*dst, false))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Opcode::FAddRRR => {
+                if inst.operands.len() >= 3 {
+                    if let (OperandType::Register(r0), OperandType::Register(r1), OperandType::Register(dst)) =
+                        (&inst.operands[0], &inst.operands[1], &inst.operands[2])
+                    {
+                        if *dst != r_ind && (*dst == *r0 || *dst == *r1) {
+                            Some((*dst, true))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((acc_reg, is_flt)) = is_acc_add {
+            if !accumulators.iter().any(|(r, _)| *r == acc_reg) {
+                accumulators.push((acc_reg, is_flt));
+                if is_flt && !float_regs.contains(&acc_reg) {
+                    float_regs.push(acc_reg);
+                }
+            }
+        }
+
+        let (dst_reg, is_flt) = match inst.opcode {
+            Opcode::Mul | Opcode::IMulRRR | Opcode::IMulRCR
+            | Opcode::Add | Opcode::IAddRRR | Opcode::IAddRCR
+            | Opcode::Sub | Opcode::ISubRRR | Opcode::ISubRCR
+            | Opcode::Div | Opcode::IDivRCR
+            | Opcode::Rem | Opcode::IRemRCR
+            | Opcode::Eq | Opcode::IEqRRR
+            | Opcode::Gt | Opcode::IGtRRR | Opcode::IGtRCR
+            | Opcode::Lt | Opcode::ILtRRR | Opcode::ILtRCR
+            | Opcode::IArrayGet | Opcode::ArrayGet | Opcode::GetIndex | Opcode::AGetIndexAR => {
+                if inst.operands.len() >= 3 {
+                    if let OperandType::Register(r) = inst.operands[2] {
+                        (Some(r), false)
+                    } else {
+                        (None, false)
+                    }
+                } else {
+                    (None, false)
+                }
+            }
+            Opcode::FMulRRR | Opcode::FMulRCR
+            | Opcode::FAddRRR | Opcode::FAddRCR
+            | Opcode::FSubRRR | Opcode::FSubRCR
+            | Opcode::FDivRRR | Opcode::FDivRCR
+            | Opcode::FArrayGet => {
+                if inst.operands.len() >= 3 {
+                    if let OperandType::Register(r) = inst.operands[2] {
+                        (Some(r), true)
+                    } else {
+                        (None, false)
+                    }
+                } else {
+                    (None, false)
+                }
+            }
+            Opcode::IArraySet | Opcode::FArraySet | Opcode::ArraySet => {
+                has_stores = true;
+                (None, false)
+            }
+            Opcode::LoadConst => {
+                if inst.operands.len() >= 2 {
+                    if let OperandType::Register(r) = inst.operands[1] {
+                        let is_f = matches!(inst.operands[0], OperandType::Constant(Value::Float(_)));
+                        (Some(r), is_f)
+                    } else {
+                        (None, false)
+                    }
+                } else {
+                    (None, false)
+                }
+            }
+            _ => return false,
+        };
+
+        if let Some(r) = dst_reg {
+            if r == r_ind {
+                return false;
+            }
+            if is_flt && !float_regs.contains(&r) {
+                float_regs.push(r);
+            }
+            if !written_regs.contains(&r) {
+                written_regs.push(r);
+            }
+        } else if !has_stores {
+            return false;
+        }
+    }
+
+    if accumulators.is_empty() && !has_stores {
+        return false;
+    }
+
+    let mut reg_map: HashMap<usize, usize> = HashMap::new();
+    let r_ind_vec = func.register_count;
+    func.register_count += 1;
+
+    let mut acc_map: Vec<(usize, usize, bool)> = Vec::new();
+    for (acc_reg, is_flt) in &accumulators {
+        let acc_vec = func.register_count;
+        func.register_count += 1;
+        acc_map.push((*acc_reg, acc_vec, *is_flt));
+        reg_map.insert(*acc_reg, acc_vec);
+    }
+
+    for &w in &written_regs {
+        if !accumulators.iter().any(|(r, _)| *r == w) {
+            let vec_r = func.register_count;
+            func.register_count += 1;
+            reg_map.insert(w, vec_r);
+        }
+    }
+
+    let r_temp_limit = func.register_count;
+    func.register_count += 1;
+    let r_temp_sum = func.register_count;
+    func.register_count += 1;
+    let r_temp_extract = func.register_count;
+    func.register_count += 1;
+    let r_temp_idx = func.register_count;
+    func.register_count += 1;
+
+    let mut new_loop_instrs = Vec::new();
+
+    // 1. Preamble: Initialize vector accumulators to zero splats
+    for &(_acc_reg, acc_vec, is_flt) in &acc_map {
+        if is_flt {
+            new_loop_instrs.push(Instruction::new(
+                Opcode::VSplatF,
+                vec![
+                    OperandType::Constant(Value::Float(0.0)),
+                    OperandType::Constant(Value::Int(4)),
+                    OperandType::Register(acc_vec),
+                ],
+            ));
+        } else {
+            new_loop_instrs.push(Instruction::new(
+                Opcode::VSplatI,
+                vec![
+                    OperandType::Constant(Value::Int(0)),
+                    OperandType::Constant(Value::Int(4)),
+                    OperandType::Register(acc_vec),
+                ],
+            ));
+        }
+    }
+
+    // 2. Vector Loop Head
+    let vec_head_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IAddRCR,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(3)),
+            OperandType::Register(r_temp_limit),
+        ],
+    ));
+    let lt_opcode = if matches!(limit_op, OperandType::Constant(_)) {
+        Opcode::ILtRCR
+    } else {
+        Opcode::ILtRRR
+    };
+    new_loop_instrs.push(Instruction::new(
+        lt_opcode,
         vec![
             OperandType::Register(r_temp_limit),
             limit_op.clone(),
@@ -839,30 +1631,184 @@ fn transform_loop_to_simd(
         vec![OperandType::Register(cond_reg), OperandType::Offset(0)],
     ));
 
-    // Vector Body: Lane 0
-    new_loop_instrs.extend(body.clone());
+    // 3. Vector Loop Body
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VIotaI,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(4)),
+            OperandType::Register(r_ind_vec),
+        ],
+    ));
 
-    // Lanes 1..4
-    for k in 1..4 {
-        let lane_base = base_reg + (k - 1) * regs_per_lane;
-        let r_ind_k = lane_base;
-        new_loop_instrs.push(Instruction::new(
-            Opcode::IAddRCR,
-            vec![
-                OperandType::Register(r_ind),
-                OperandType::Constant(Value::Int(k as i64)),
-                OperandType::Register(r_ind_k),
-            ],
-        ));
+    for inst in &body {
+        let is_acc_add = match inst.opcode {
+            Opcode::Add | Opcode::IAddRRR | Opcode::FAddRRR => {
+                if let (OperandType::Register(r0), OperandType::Register(r1), OperandType::Register(dst)) =
+                    (&inst.operands[0], &inst.operands[1], &inst.operands[2])
+                {
+                    accumulators.iter().any(|(a, _)| *a == *dst && (*a == *r0 || *a == *r1))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
 
-        for inst in &body {
-            let mut new_inst = inst.clone();
-            for op in &mut new_inst.operands {
-                if let OperandType::Register(r) = op {
+        if is_acc_add {
+            let dst_acc = match &inst.operands[2] {
+                OperandType::Register(r) => *r,
+                _ => unreachable!(),
+            };
+            let acc_vec = *reg_map.get(&dst_acc).unwrap();
+            let other_op = if let OperandType::Register(r0) = &inst.operands[0] {
+                if *r0 == dst_acc {
+                    &inst.operands[1]
+                } else {
+                    &inst.operands[0]
+                }
+            } else {
+                &inst.operands[0]
+            };
+
+            let other_vec_op = match other_op {
+                OperandType::Register(r) => {
                     if *r == r_ind {
-                        *op = OperandType::Register(r_ind_k);
-                    } else if let Some(idx) = written_regs.iter().position(|w| w == r) {
-                        *op = OperandType::Register(lane_base + 1 + idx);
+                        OperandType::Register(r_ind_vec)
+                    } else if let Some(&vec_r) = reg_map.get(r) {
+                        OperandType::Register(vec_r)
+                    } else {
+                        other_op.clone()
+                    }
+                }
+                _ => other_op.clone(),
+            };
+
+            let vec_opcode = if inst.opcode == Opcode::FAddRRR {
+                Opcode::VAddF
+            } else {
+                Opcode::VAddI
+            };
+
+            new_loop_instrs.push(Instruction::new(
+                vec_opcode,
+                vec![
+                    OperandType::Register(acc_vec),
+                    other_vec_op,
+                    OperandType::Register(acc_vec),
+                ],
+            ));
+        } else if matches!(inst.opcode, Opcode::IArraySet | Opcode::FArraySet | Opcode::ArraySet) {
+            let arr_op = inst.operands[0].clone();
+            let idx_op = &inst.operands[1];
+            let val_op = &inst.operands[2];
+
+            let vec_val_r = match val_op {
+                OperandType::Register(r) => *reg_map.get(r).unwrap_or(r),
+                _ => 0,
+            };
+
+            for k in 0..4 {
+                new_loop_instrs.push(Instruction::new(
+                    Opcode::VExtractI,
+                    vec![
+                        OperandType::Register(vec_val_r),
+                        OperandType::Constant(Value::Int(k as i64)),
+                        OperandType::Register(r_temp_extract),
+                    ],
+                ));
+
+                let store_idx_op = match idx_op {
+                    OperandType::Register(r) if *r == r_ind => {
+                        if k == 0 {
+                            OperandType::Register(r_ind)
+                        } else {
+                            new_loop_instrs.push(Instruction::new(
+                                Opcode::IAddRCR,
+                                vec![
+                                    OperandType::Register(r_ind),
+                                    OperandType::Constant(Value::Int(k as i64)),
+                                    OperandType::Register(r_temp_idx),
+                                ],
+                            ));
+                            OperandType::Register(r_temp_idx)
+                        }
+                    }
+                    OperandType::Register(r) if reg_map.contains_key(r) => {
+                        let vec_idx_r = reg_map[r];
+                        new_loop_instrs.push(Instruction::new(
+                            Opcode::VExtractI,
+                            vec![
+                                OperandType::Register(vec_idx_r),
+                                OperandType::Constant(Value::Int(k as i64)),
+                                OperandType::Register(r_temp_idx),
+                            ],
+                        ));
+                        OperandType::Register(r_temp_idx)
+                    }
+                    _ => idx_op.clone(),
+                };
+
+                new_loop_instrs.push(Instruction::new(
+                    inst.opcode,
+                    vec![
+                        arr_op.clone(),
+                        store_idx_op,
+                        OperandType::Register(r_temp_extract),
+                    ],
+                ));
+            }
+        } else {
+            let mut new_inst = inst.clone();
+            new_inst.opcode = match inst.opcode {
+                Opcode::Mul | Opcode::IMulRRR => Opcode::VMulI,
+                Opcode::FMulRRR => Opcode::VMulF,
+                Opcode::Add | Opcode::IAddRRR => Opcode::VAddI,
+                Opcode::FAddRRR => Opcode::VAddF,
+                Opcode::Sub | Opcode::ISubRRR => Opcode::VSubI,
+                Opcode::FSubRRR => Opcode::VSubF,
+                Opcode::Div => Opcode::VDivI,
+                Opcode::FDivRRR => Opcode::VDivF,
+                Opcode::Rem => Opcode::VRemI,
+                Opcode::IAddRCR => Opcode::VAddIC,
+                Opcode::ISubRCR => Opcode::VSubIC,
+                Opcode::IMulRCR => Opcode::VMulIC,
+                Opcode::IDivRCR => Opcode::VDivIC,
+                Opcode::IRemRCR => Opcode::VRemIC,
+                Opcode::Eq | Opcode::IEqRRR => Opcode::VCmpEqI,
+                Opcode::Gt | Opcode::IGtRRR => Opcode::VCmpGtI,
+                Opcode::Lt | Opcode::ILtRRR => Opcode::VCmpLtI,
+                Opcode::IArrayGet | Opcode::ArrayGet | Opcode::GetIndex | Opcode::AGetIndexAR => Opcode::VGatherI,
+                Opcode::FArrayGet => Opcode::VGatherI,
+                Opcode::LoadConst => {
+                    if matches!(inst.operands.first(), Some(OperandType::Constant(Value::Float(_)))) {
+                        Opcode::VSplatF
+                    } else {
+                        Opcode::VSplatI
+                    }
+                }
+                _ => inst.opcode,
+            };
+
+            if new_inst.opcode == Opcode::VSplatI || new_inst.opcode == Opcode::VSplatF {
+                let const_op = inst.operands[0].clone();
+                let dst_r = match &inst.operands[1] {
+                    OperandType::Register(r) => *reg_map.get(r).unwrap_or(r),
+                    _ => unreachable!(),
+                };
+                new_inst.operands = vec![
+                    const_op,
+                    OperandType::Constant(Value::Int(4)),
+                    OperandType::Register(dst_r),
+                ];
+            } else {
+                for op in &mut new_inst.operands {
+                    if let OperandType::Register(r) = op {
+                        if *r == r_ind {
+                            *op = OperandType::Register(r_ind_vec);
+                        } else if let Some(&vec_r) = reg_map.get(r) {
+                            *op = OperandType::Register(vec_r);
+                        }
                     }
                 }
             }
@@ -870,7 +1816,7 @@ fn transform_loop_to_simd(
         }
     }
 
-    // Vector Latch:
+    // 4. Vector Loop Latch
     new_loop_instrs.push(Instruction::new(
         Opcode::IAddRCR,
         vec![
@@ -879,19 +1825,56 @@ fn transform_loop_to_simd(
             OperandType::Register(r_ind),
         ],
     ));
-    let vec_back_offset = -(new_loop_instrs.len() as i64);
+    let vec_back_offset = -((new_loop_instrs.len() - vec_head_idx) as i64);
     new_loop_instrs.push(Instruction::new(
         Opcode::Jump,
         vec![OperandType::Offset(vec_back_offset)],
     ));
 
-    // Epilogue Header
+    // 5. Epilogue Preamble: reduce vector accumulators to scalar
     let epilogue_head_offset = (new_loop_instrs.len() - vec_cond_idx) as i64;
     new_loop_instrs[vec_cond_idx].operands[1] = OperandType::Offset(epilogue_head_offset);
 
+    for &(acc_reg, acc_vec, is_flt) in &acc_map {
+        if is_flt {
+            new_loop_instrs.push(Instruction::new(
+                Opcode::VSumF,
+                vec![
+                    OperandType::Register(acc_vec),
+                    OperandType::Register(r_temp_sum),
+                ],
+            ));
+            new_loop_instrs.push(Instruction::new(
+                Opcode::FAddRRR,
+                vec![
+                    OperandType::Register(acc_reg),
+                    OperandType::Register(r_temp_sum),
+                    OperandType::Register(acc_reg),
+                ],
+            ));
+        } else {
+            new_loop_instrs.push(Instruction::new(
+                Opcode::VSumI,
+                vec![
+                    OperandType::Register(acc_vec),
+                    OperandType::Register(r_temp_sum),
+                ],
+            ));
+            new_loop_instrs.push(Instruction::new(
+                Opcode::IAddRRR,
+                vec![
+                    OperandType::Register(acc_reg),
+                    OperandType::Register(r_temp_sum),
+                    OperandType::Register(acc_reg),
+                ],
+            ));
+        }
+    }
+
+    // 6. Epilogue Loop
     let epilogue_head_idx = new_loop_instrs.len();
     new_loop_instrs.push(Instruction::new(
-        Opcode::ILtRRR,
+        lt_opcode,
         vec![
             OperandType::Register(r_ind),
             limit_op,
@@ -917,18 +1900,290 @@ fn transform_loop_to_simd(
         ],
     ));
     let epi_latch_idx = new_loop_instrs.len();
-    let epilogue_back_offset = -( (epi_latch_idx - epilogue_head_idx) as i64 );
+    let epilogue_back_offset = -((epi_latch_idx - epilogue_head_idx) as i64);
     new_loop_instrs.push(Instruction::new(
         Opcode::Jump,
         vec![OperandType::Offset(epilogue_back_offset)],
     ));
 
-    let final_exit_offset = (new_loop_instrs.len() - epilogue_cond_idx) as i64;
-    new_loop_instrs[epilogue_cond_idx].operands[1] = OperandType::Offset(final_exit_offset);
-
     let old_loop_len = back_pc - head_pc + 1;
     let new_loop_len = new_loop_instrs.len();
     let diff = new_loop_len as i64 - old_loop_len as i64;
+
+    let target_pc_new = if exit_target > back_pc {
+        exit_target as i64 + diff
+    } else {
+        exit_target as i64
+    };
+    let final_exit_offset = target_pc_new - (head_pc + epilogue_cond_idx) as i64;
+    new_loop_instrs[epilogue_cond_idx].operands[1] = OperandType::Offset(final_exit_offset);
+
+    for i in 0..head_pc {
+        let inst = &mut func.instructions[i];
+        for op in &mut inst.operands {
+            if let OperandType::Offset(off) = op {
+                let target = i as i64 + *off;
+                if target > back_pc as i64 {
+                    *off += diff;
+                }
+            }
+        }
+    }
+
+    func.instructions.splice(head_pc..=back_pc, new_loop_instrs);
+    true
+}
+
+fn transform_loop_to_unroll_simd(
+    func: &mut Function,
+    head_pc: usize,
+    back_pc: usize,
+    r_ind: usize,
+    limit_op: OperandType,
+    cond_reg: usize,
+    exit_target: usize,
+) -> bool {
+    if head_pc + 2 >= back_pc {
+        return false;
+    }
+    let body = func.instructions[head_pc + 2..back_pc - 1].to_vec();
+
+    // Do NOT unroll loops containing concurrency or writes to r_ind (calls and early returns ARE handled)
+    for inst in &body {
+        if matches!(
+            inst.opcode,
+            Opcode::Spawn
+                | Opcode::Send
+                | Opcode::Receive
+                | Opcode::ReceiveTimeout
+        ) {
+            return false;
+        }
+        if let Some(r) = get_written_reg(inst) {
+            if r == r_ind {
+                return false;
+            }
+        }
+    }
+
+    let mut written_regs: Vec<usize> = Vec::new();
+    for inst in &body {
+        if let Some(r) = get_written_reg(inst) {
+            if r != r_ind && !written_regs.contains(&r) {
+                written_regs.push(r);
+            }
+        }
+    }
+
+    let base_reg = func.register_count;
+    let regs_per_lane = written_regs.len() + 1;
+    let total_new_regs = 3 * regs_per_lane + 2;
+    let r_temp_limit = base_reg + 3 * regs_per_lane;
+    let r_v_ind = base_reg + 3 * regs_per_lane + 1;
+    func.register_count += total_new_regs;
+
+    let mut new_loop_instrs = Vec::new();
+
+    // 1. Vector Loop Header
+    let vec_head_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IAddRCR,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(3)),
+            OperandType::Register(r_temp_limit),
+        ],
+    ));
+    let lt_opcode = if matches!(limit_op, OperandType::Constant(_)) {
+        Opcode::ILtRCR
+    } else {
+        Opcode::ILtRRR
+    };
+    new_loop_instrs.push(Instruction::new(
+        lt_opcode,
+        vec![
+            OperandType::Register(r_temp_limit),
+            limit_op.clone(),
+            OperandType::Register(cond_reg),
+        ],
+    ));
+    let vec_cond_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IJumpFalseR,
+        vec![OperandType::Register(cond_reg), OperandType::Offset(0)],
+    ));
+
+    // Emit VIotaI and VExtractI to prime SIMD registers
+    new_loop_instrs.push(Instruction::new(
+        Opcode::VIotaI,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(4)),
+            OperandType::Register(r_v_ind),
+        ],
+    ));
+    for k in 1..4 {
+        let r_ind_k = base_reg + (k - 1) * regs_per_lane;
+        new_loop_instrs.push(Instruction::new(
+            Opcode::VExtractI,
+            vec![
+                OperandType::Register(r_v_ind),
+                OperandType::Constant(Value::Int(k as i64)),
+                OperandType::Register(r_ind_k),
+            ],
+        ));
+    }
+
+    // 2. Emit 4 lanes and record positions
+    let mut lane_start_indices = [0usize; 4];
+    let mut lane_instr_map = vec![vec![0usize; body.len()]; 4];
+
+    for k in 0..4 {
+        lane_start_indices[k] = new_loop_instrs.len();
+        let lane_base = if k == 0 { 0 } else { base_reg + (k - 1) * regs_per_lane };
+        let r_ind_k = if k == 0 { r_ind } else { lane_base };
+
+        for (j, inst) in body.iter().enumerate() {
+            lane_instr_map[k][j] = new_loop_instrs.len();
+            let mut new_inst = inst.clone();
+
+            for op in &mut new_inst.operands {
+                if let OperandType::Register(r) = op {
+                    if *r == r_ind {
+                        *op = OperandType::Register(r_ind_k);
+                    } else if k > 0 {
+                        if let Some(idx) = written_regs.iter().position(|w| w == r) {
+                            *op = OperandType::Register(lane_base + 1 + idx);
+                        }
+                    }
+                }
+            }
+            new_loop_instrs.push(new_inst);
+        }
+    }
+
+    // 3. Vector Latch
+    let vec_latch_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IAddRCR,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(4)),
+            OperandType::Register(r_ind),
+        ],
+    ));
+    let vec_back_offset = -((new_loop_instrs.len() - vec_head_idx) as i64);
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(vec_back_offset)],
+    ));
+
+    // 4. Scalar Epilogue Header
+    let epilogue_head_idx = new_loop_instrs.len();
+    let vec_exit_offset = (epilogue_head_idx - vec_cond_idx) as i64;
+    new_loop_instrs[vec_cond_idx].operands[1] = OperandType::Offset(vec_exit_offset);
+
+    new_loop_instrs.push(Instruction::new(
+        lt_opcode,
+        vec![
+            OperandType::Register(r_ind),
+            limit_op,
+            OperandType::Register(cond_reg),
+        ],
+    ));
+    let epilogue_cond_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IJumpFalseR,
+        vec![OperandType::Register(cond_reg), OperandType::Offset(0)],
+    ));
+
+    // Scalar Epilogue Body
+    let mut epi_instr_map = vec![0usize; body.len()];
+    for (j, inst) in body.iter().enumerate() {
+        epi_instr_map[j] = new_loop_instrs.len();
+        new_loop_instrs.push(inst.clone());
+    }
+
+    // Scalar Epilogue Latch
+    let epi_latch_idx = new_loop_instrs.len();
+    new_loop_instrs.push(Instruction::new(
+        Opcode::IAddRCR,
+        vec![
+            OperandType::Register(r_ind),
+            OperandType::Constant(Value::Int(1)),
+            OperandType::Register(r_ind),
+        ],
+    ));
+    let epilogue_back_offset = -((new_loop_instrs.len() - epilogue_head_idx) as i64);
+    new_loop_instrs.push(Instruction::new(
+        Opcode::Jump,
+        vec![OperandType::Offset(epilogue_back_offset)],
+    ));
+
+    // 5. Jump Target Relocation for all 4 lanes
+    let old_loop_len = back_pc - head_pc + 1;
+    let new_loop_len = new_loop_instrs.len();
+    let diff = new_loop_len as i64 - old_loop_len as i64;
+
+    for k in 0..4 {
+        for (j, _inst) in body.iter().enumerate() {
+            let cur_idx = lane_instr_map[k][j];
+            let orig_pc = head_pc + 2 + j;
+
+            for op in &mut new_loop_instrs[cur_idx].operands {
+                if let OperandType::Offset(orig_off) = op {
+                    let orig_target = orig_pc as i64 + *orig_off;
+                    if orig_target >= (head_pc + 2) as i64 && orig_target < (back_pc - 1) as i64 {
+                        let target_j = (orig_target - (head_pc + 2) as i64) as usize;
+                        let new_target_idx = lane_instr_map[k][target_j];
+                        *orig_off = new_target_idx as i64 - cur_idx as i64;
+                    } else if orig_target == (back_pc - 1) as i64 || orig_target == back_pc as i64 {
+                        let new_target_idx = if k < 3 {
+                            lane_start_indices[k + 1]
+                        } else {
+                            vec_latch_idx
+                        };
+                        *orig_off = new_target_idx as i64 - cur_idx as i64;
+                    } else if orig_target >= (back_pc + 1) as i64 {
+                        let target_pc_new = orig_target + diff;
+                        *orig_off = target_pc_new - (head_pc + cur_idx) as i64;
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Jump Target Relocation for Scalar Epilogue
+    for (j, _inst) in body.iter().enumerate() {
+        let cur_idx = epi_instr_map[j];
+        let orig_pc = head_pc + 2 + j;
+
+        for op in &mut new_loop_instrs[cur_idx].operands {
+            if let OperandType::Offset(orig_off) = op {
+                let orig_target = orig_pc as i64 + *orig_off;
+                if orig_target >= (head_pc + 2) as i64 && orig_target < (back_pc - 1) as i64 {
+                    let target_j = (orig_target - (head_pc + 2) as i64) as usize;
+                    let new_target_idx = epi_instr_map[target_j];
+                    *orig_off = new_target_idx as i64 - cur_idx as i64;
+                } else if orig_target == (back_pc - 1) as i64 || orig_target == back_pc as i64 {
+                    *orig_off = epi_latch_idx as i64 - cur_idx as i64;
+                }
+            }
+        }
+    }
+
+    // 7. Splicing into Function and Adjusting External Jumps
+    let old_loop_len = back_pc - head_pc + 1;
+    let new_loop_len = new_loop_instrs.len();
+    let diff = new_loop_len as i64 - old_loop_len as i64;
+
+    let target_pc_new = if exit_target > back_pc {
+        exit_target as i64 + diff
+    } else {
+        exit_target as i64
+    };
+    let final_exit_offset = target_pc_new - (head_pc + epilogue_cond_idx) as i64;
+    new_loop_instrs[epilogue_cond_idx].operands[1] = OperandType::Offset(final_exit_offset);
 
     for i in 0..head_pc {
         let inst = &mut func.instructions[i];

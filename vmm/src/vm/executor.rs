@@ -902,6 +902,9 @@ fn op_get_index<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         Value::Array(arr) => arr.read().unwrap().get(idx_val).cloned().unwrap_or(Value::Nil),
         Value::IntArray(arr) => arr.read().unwrap().get(idx_val).copied().map(Value::Int).unwrap_or(Value::Nil),
         Value::FloatArray(arr) => arr.read().unwrap().get(idx_val).copied().map(Value::Float).unwrap_or(Value::Nil),
+        Value::V4Int(arr) => arr.get(idx_val).copied().map(Value::Int).unwrap_or(Value::Nil),
+        Value::V4Float(arr) => arr.get(idx_val).copied().map(Value::Float).unwrap_or(Value::Nil),
+        Value::V4Bool(arr) => arr.get(idx_val).copied().map(Value::Bool).unwrap_or(Value::Nil),
         Value::Object(obj) => {
             let borrowed = obj.read().unwrap();
             if idx_val < borrowed.indexed.len() {
@@ -2046,43 +2049,67 @@ fn op_F_lt_jmp_RC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
     become fetch_and_dispatch(ctx);
 }
 
-fn op_S_concat_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
-    let (v1, v2, dst_op) = {
-        let frame = ctx.process.frame_stack.last().unwrap();
-        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-        let v1 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
-        let v2 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
-        (v1, v2, inst.operands[2].clone())
-    };
+#[inline(always)]
+fn resolve_str_borrow<'a>(proc: &'a Process, op: &'a OperandType) -> Option<&'a str> {
+    let frame = proc.frame_stack.last()?;
+    match op {
+        OperandType::Register(r) => match frame.registers.get(*r)? {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        },
+        OperandType::Constant(Value::String(s)) => Some(s.as_str()),
+        OperandType::Argument(a) => match frame.arguments.get(*a)? {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
-    let s1 = v1.to_str();
-    let s2 = v2.to_str();
-    let mut out = String::with_capacity(s1.len() + s2.len());
-    out.push_str(&s1);
-    out.push_str(&s2);
+fn op_S_concat_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
+    let frame = ctx.process.frame_stack.last().unwrap();
+    let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let s1_opt = resolve_str_borrow(ctx.process, &inst.operands[0]);
+    let s2_opt = resolve_str_borrow(ctx.process, &inst.operands[1]);
+    let dst_op = inst.operands[2].clone();
+
+    let out = match (s1_opt, s2_opt) {
+        (Some(s1), Some(s2)) => {
+            let mut s = String::with_capacity(s1.len() + s2.len());
+            s.push_str(s1);
+            s.push_str(s2);
+            s
+        }
+        _ => {
+            let v1 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
+            let v2 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
+            let s1 = v1.to_str();
+            let s2 = v2.to_str();
+            let mut s = String::with_capacity(s1.len() + s2.len());
+            s.push_str(&s1);
+            s.push_str(&s2);
+            s
+        }
+    };
     save_value_to_operand(ctx.process, &dst_op, Value::String(out));
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
 
 fn op_S_slice_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
-    let (val, start_idx, dst_op) = {
-        let frame = ctx.process.frame_stack.last().unwrap();
-        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-        let val = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
-        let start_idx = match resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]) {
-            Value::Int(i) => i.max(0) as usize,
-            _ => 0,
-        };
-        (val, start_idx, inst.operands[2].clone())
+    let frame = ctx.process.frame_stack.last().unwrap();
+    let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let start_idx = match resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]) {
+        Value::Int(i) => i.max(0) as usize,
+        _ => 0,
     };
+    let dst_op = inst.operands[2].clone();
 
-    let res = match val {
-        Value::String(s) => {
-            let start = start_idx.min(s.len());
-            Value::String(s[start..].to_string())
-        }
-        _ => Value::String("".to_string()),
+    let res = if let Some(s) = resolve_str_borrow(ctx.process, &inst.operands[0]) {
+        let start = start_idx.min(s.len());
+        Value::String(s[start..].to_string())
+    } else {
+        Value::String("".to_string())
     };
     save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -2090,28 +2117,24 @@ fn op_S_slice_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 }
 
 fn op_S_slice_RRRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
-    let (val, start_idx, end_idx, dst_op) = {
-        let frame = ctx.process.frame_stack.last().unwrap();
-        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-        let val = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
-        let start_idx = match resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]) {
-            Value::Int(i) => i.max(0) as usize,
-            _ => 0,
-        };
-        let end_idx = match resolve_operand(ctx.bytecode, ctx.process, &inst.operands[2]) {
-            Value::Int(i) => i.max(0) as usize,
-            _ => 0,
-        };
-        (val, start_idx, end_idx, inst.operands[3].clone())
+    let frame = ctx.process.frame_stack.last().unwrap();
+    let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let start_idx = match resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]) {
+        Value::Int(i) => i.max(0) as usize,
+        _ => 0,
     };
+    let end_idx = match resolve_operand(ctx.bytecode, ctx.process, &inst.operands[2]) {
+        Value::Int(i) => i.max(0) as usize,
+        _ => 0,
+    };
+    let dst_op = inst.operands[3].clone();
 
-    let res = match val {
-        Value::String(s) => {
-            let start = start_idx.min(s.len());
-            let end = end_idx.min(s.len()).max(start);
-            Value::String(s[start..end].to_string())
-        }
-        _ => Value::String("".to_string()),
+    let res = if let Some(s) = resolve_str_borrow(ctx.process, &inst.operands[0]) {
+        let start = start_idx.min(s.len());
+        let end = end_idx.min(s.len()).max(start);
+        Value::String(s[start..end].to_string())
+    } else {
+        Value::String("".to_string())
     };
     save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -2119,17 +2142,19 @@ fn op_S_slice_RRRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 }
 
 fn op_S_eq_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
-    let (v1, v2, dst_op) = {
-        let frame = ctx.process.frame_stack.last().unwrap();
-        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-        let v1 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
-        let v2 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
-        (v1, v2, inst.operands[2].clone())
-    };
+    let frame = ctx.process.frame_stack.last().unwrap();
+    let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let s1 = resolve_str_borrow(ctx.process, &inst.operands[0]);
+    let s2 = resolve_str_borrow(ctx.process, &inst.operands[1]);
+    let dst_op = inst.operands[2].clone();
 
-    let eq = match (&v1, &v2) {
-        (Value::String(a), Value::String(b)) => crate::vm::simd::simd_str_eq(a, b),
-        _ => false,
+    let eq = match (s1, s2) {
+        (Some(a), Some(b)) => crate::vm::simd::simd_str_eq(a, b),
+        _ => {
+            let v1 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
+            let v2 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
+            v1.eql(&v2)
+        }
     };
     save_value_to_operand(ctx.process, &dst_op, Value::Bool(eq));
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -2137,16 +2162,14 @@ fn op_S_eq_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 }
 
 fn op_S_find_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
-    let (v1, v2, dst_op) = {
-        let frame = ctx.process.frame_stack.last().unwrap();
-        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-        let v1 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
-        let v2 = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
-        (v1, v2, inst.operands[2].clone())
-    };
+    let frame = ctx.process.frame_stack.last().unwrap();
+    let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let s1 = resolve_str_borrow(ctx.process, &inst.operands[0]);
+    let s2 = resolve_str_borrow(ctx.process, &inst.operands[1]);
+    let dst_op = inst.operands[2].clone();
 
-    let idx = match (&v1, &v2) {
-        (Value::String(haystack), Value::String(needle)) => {
+    let idx = match (s1, s2) {
+        (Some(haystack), Some(needle)) => {
             crate::vm::simd::simd_str_find(haystack, needle)
                 .map(|i| i as i64)
                 .unwrap_or(-1)
@@ -2159,16 +2182,14 @@ fn op_S_find_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 }
 
 fn op_S_to_int_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
-    let (v, dst_op) = {
-        let frame = ctx.process.frame_stack.last().unwrap();
-        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
-        let v = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
-        (v, inst.operands[1].clone())
-    };
+    let frame = ctx.process.frame_stack.last().unwrap();
+    let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let dst_op = inst.operands[1].clone();
 
-    let res = match v {
-        Value::String(s) => Value::Int(s.trim().parse::<i64>().unwrap_or(0)),
-        _ => Value::Int(0),
+    let res = if let Some(s) = resolve_str_borrow(ctx.process, &inst.operands[0]) {
+        Value::Int(s.trim().parse::<i64>().unwrap_or(0))
+    } else {
+        Value::Int(0)
     };
     save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -2584,6 +2605,7 @@ fn op_array_len<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         Value::Array(a) => a.read().unwrap().len() as i64,
         Value::IntArray(a) => a.read().unwrap().len() as i64,
         Value::FloatArray(a) => a.read().unwrap().len() as i64,
+        Value::V4Int(_) | Value::V4Float(_) | Value::V4Bool(_) => 4,
         _ => 0,
     };
     save_value_to_operand(ctx.process, &dst_op, Value::Int(len));
@@ -2888,6 +2910,9 @@ fn op_V_add_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Float(a), Value::V4Float(b)) => {
+            Value::V4Float(crate::vm::simd::simd_v4add_f(a, b))
+        }
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -2911,6 +2936,9 @@ fn op_V_sub_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Float(a), Value::V4Float(b)) => {
+            Value::V4Float(crate::vm::simd::simd_v4sub_f(a, b))
+        }
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -2934,6 +2962,9 @@ fn op_V_mul_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Float(a), Value::V4Float(b)) => {
+            Value::V4Float(crate::vm::simd::simd_v4mul_f(a, b))
+        }
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -2957,6 +2988,9 @@ fn op_V_dot_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Float(a), Value::V4Float(b)) => {
+            Value::Float(crate::vm::simd::simd_v4dot_f(a, b))
+        }
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -2978,6 +3012,9 @@ fn op_V_add_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Int(a), Value::V4Int(b)) => {
+            Value::V4Int(crate::vm::simd::simd_v4add_i(a, b))
+        }
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -3001,6 +3038,9 @@ fn op_V_sub_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Int(a), Value::V4Int(b)) => {
+            Value::V4Int(crate::vm::simd::simd_v4sub_i(a, b))
+        }
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -3024,6 +3064,9 @@ fn op_V_mul_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Int(a), Value::V4Int(b)) => {
+            Value::V4Int(crate::vm::simd::simd_v4mul_i(a, b))
+        }
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -3046,6 +3089,7 @@ fn op_V_sum_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v, inst.operands[1].clone())
     };
     let sum = match v {
+        Value::V4Int(a) => crate::vm::simd::simd_v4sum_i(a),
         Value::IntArray(a) => crate::vm::simd::simd_vsum_i(&a.read().unwrap()),
         _ => 0,
     };
@@ -3062,6 +3106,7 @@ fn op_V_sum_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v, inst.operands[1].clone())
     };
     let sum = match v {
+        Value::V4Float(a) => crate::vm::simd::simd_v4sum_f(a),
         Value::FloatArray(a) => crate::vm::simd::simd_vsum_f(&a.read().unwrap()),
         _ => 0.0,
     };
@@ -3090,13 +3135,19 @@ fn op_S_upper_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         }
     }
 
-    let v = resolve_operand(ctx.bytecode, ctx.process, &src_op);
-    let res = match v {
-        Value::String(mut s) => {
-            crate::vm::simd::simd_str_to_upper_mut(&mut s);
-            Value::String(s)
+    let res = if let Some(s) = resolve_str_borrow(ctx.process, &src_op) {
+        let mut owned = s.to_string();
+        crate::vm::simd::simd_str_to_upper_mut(&mut owned);
+        Value::String(owned)
+    } else {
+        let v = resolve_operand(ctx.bytecode, ctx.process, &src_op);
+        match v {
+            Value::String(mut s) => {
+                crate::vm::simd::simd_str_to_upper_mut(&mut s);
+                Value::String(s)
+            }
+            other => other,
         }
-        other => other,
     };
     save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -3119,13 +3170,19 @@ fn op_S_lower_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         }
     }
 
-    let v = resolve_operand(ctx.bytecode, ctx.process, &src_op);
-    let res = match v {
-        Value::String(mut s) => {
-            crate::vm::simd::simd_str_to_lower_mut(&mut s);
-            Value::String(s)
+    let res = if let Some(s) = resolve_str_borrow(ctx.process, &src_op) {
+        let mut owned = s.to_string();
+        crate::vm::simd::simd_str_to_lower_mut(&mut owned);
+        Value::String(owned)
+    } else {
+        let v = resolve_operand(ctx.bytecode, ctx.process, &src_op);
+        match v {
+            Value::String(mut s) => {
+                crate::vm::simd::simd_str_to_lower_mut(&mut s);
+                Value::String(s)
+            }
+            other => other,
         }
-        other => other,
     };
     save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -3133,21 +3190,31 @@ fn op_S_lower_RR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
 }
 
 fn op_S_count_byte_RRR<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
-    let (v_str, v_byte, dst_op) = {
-        let frame = ctx.process.frame_stack.last().unwrap();
-        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let frame = ctx.process.frame_stack.last().unwrap();
+    let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+    let s_opt = resolve_str_borrow(ctx.process, &inst.operands[0]);
+    let dst_op = inst.operands[2].clone();
+
+    let count = if let Some(s) = s_opt {
+        match resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]) {
+            Value::Int(b) => crate::vm::simd::simd_str_count_byte(s, b as u8) as i64,
+            Value::String(needle) if !needle.is_empty() => {
+                crate::vm::simd::simd_str_count_byte(s, needle.as_bytes()[0]) as i64
+            }
+            _ => 0,
+        }
+    } else {
         let s = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
         let b = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]);
-        (s, b, inst.operands[2].clone())
-    };
-    let count = match (v_str, v_byte) {
-        (Value::String(s), Value::Int(b)) => {
-            crate::vm::simd::simd_str_count_byte(&s, b as u8) as i64
+        match (s, b) {
+            (Value::String(s), Value::Int(b)) => {
+                crate::vm::simd::simd_str_count_byte(&s, b as u8) as i64
+            }
+            (Value::String(s), Value::String(needle)) if !needle.is_empty() => {
+                crate::vm::simd::simd_str_count_byte(&s, needle.as_bytes()[0]) as i64
+            }
+            _ => 0,
         }
-        (Value::String(s), Value::String(needle)) if !needle.is_empty() => {
-            crate::vm::simd::simd_str_count_byte(&s, needle.as_bytes()[0]) as i64
-        }
-        _ => 0,
     };
     save_value_to_operand(ctx.process, &dst_op, Value::Int(count));
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -3772,12 +3839,13 @@ fn op_V_iota_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         Value::Int(i) => i.max(0) as usize,
         _ => 0,
     };
-    let vec = crate::vm::simd::simd_viota_i(s_int, c_int);
-    save_value_to_operand(
-        ctx.process,
-        &dst_op,
-        Value::IntArray(Arc::new(RwLock::new(vec))),
-    );
+    let res = if c_int == 4 {
+        Value::V4Int([s_int, s_int + 1, s_int + 2, s_int + 3])
+    } else {
+        let vec = crate::vm::simd::simd_viota_i(s_int, c_int);
+        Value::IntArray(Arc::new(RwLock::new(vec)))
+    };
+    save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -3798,12 +3866,13 @@ fn op_V_splat_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         Value::Int(i) => i.max(0) as usize,
         _ => 0,
     };
-    let vec = crate::vm::simd::simd_vsplat_i(v_int, c_int);
-    save_value_to_operand(
-        ctx.process,
-        &dst_op,
-        Value::IntArray(Arc::new(RwLock::new(vec))),
-    );
+    let res = if c_int == 4 {
+        Value::V4Int([v_int, v_int, v_int, v_int])
+    } else {
+        let vec = crate::vm::simd::simd_vsplat_i(v_int, c_int);
+        Value::IntArray(Arc::new(RwLock::new(vec)))
+    };
+    save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -3825,12 +3894,13 @@ fn op_V_splat_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         Value::Int(i) => i.max(0) as usize,
         _ => 0,
     };
-    let vec = crate::vm::simd::simd_vsplat_f(v_float, c_int);
-    save_value_to_operand(
-        ctx.process,
-        &dst_op,
-        Value::FloatArray(Arc::new(RwLock::new(vec))),
-    );
+    let res = if c_int == 4 {
+        Value::V4Float([v_float, v_float, v_float, v_float])
+    } else {
+        let vec = crate::vm::simd::simd_vsplat_f(v_float, c_int);
+        Value::FloatArray(Arc::new(RwLock::new(vec)))
+    };
+    save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
     become fetch_and_dispatch(ctx);
 }
@@ -3848,6 +3918,7 @@ fn op_V_add_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         _ => 0,
     };
     let res = match v {
+        Value::V4Int(a) => Value::V4Int(crate::vm::simd::simd_v4add_ic(a, c_int)),
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
             Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vadd_ic(
@@ -3874,6 +3945,7 @@ fn op_V_sub_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         _ => 0,
     };
     let res = match v {
+        Value::V4Int(a) => Value::V4Int(crate::vm::simd::simd_v4sub_ic(a, c_int)),
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
             Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vsub_ic(
@@ -3900,6 +3972,7 @@ fn op_V_mul_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         _ => 0,
     };
     let res = match v {
+        Value::V4Int(a) => Value::V4Int(crate::vm::simd::simd_v4mul_ic(a, c_int)),
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
             Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vmul_ic(
@@ -3926,6 +3999,7 @@ fn op_V_div_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         _ => 0,
     };
     let res = match v {
+        Value::V4Int(a) => Value::V4Int(crate::vm::simd::simd_v4div_ic(a, c_int)),
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
             Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vdiv_ic(
@@ -3952,6 +4026,7 @@ fn op_V_rem_IC<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         _ => 0,
     };
     let res = match v {
+        Value::V4Int(a) => Value::V4Int(crate::vm::simd::simd_v4rem_ic(a, c_int)),
         Value::IntArray(a) => {
             let ba = a.read().unwrap();
             Value::IntArray(Arc::new(RwLock::new(crate::vm::simd::simd_vrem_ic(
@@ -3974,6 +4049,9 @@ fn op_V_div_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Int(a), Value::V4Int(b)) => {
+            Value::V4Int(crate::vm::simd::simd_v4div_i(a, b))
+        }
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -3997,6 +4075,9 @@ fn op_V_rem_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Int(a), Value::V4Int(b)) => {
+            Value::V4Int(crate::vm::simd::simd_v4rem_i(a, b))
+        }
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -4020,6 +4101,9 @@ fn op_V_div_F<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Float(a), Value::V4Float(b)) => {
+            Value::V4Float(crate::vm::simd::simd_v4div_f(a, b))
+        }
         (Value::FloatArray(a), Value::FloatArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -4043,6 +4127,32 @@ fn op_V_gather_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (t, idx, inst.operands[2].clone())
     };
     let res = match (v_table, v_indices) {
+        (Value::IntArray(t), Value::V4Int(idx)) => {
+            let bt = t.read().unwrap();
+            Value::V4Int(crate::vm::simd::simd_v4gather_i(&bt, idx))
+        }
+        (Value::FloatArray(t), Value::V4Int(idx)) => {
+            let bt = t.read().unwrap();
+            let mut out = [0.0f64; 4];
+            for i in 0..4 {
+                let pos = idx[i] as usize;
+                out[i] = bt.get(pos).copied().unwrap_or(0.0);
+            }
+            Value::V4Float(out)
+        }
+        (Value::Array(t), Value::V4Int(idx)) => {
+            let bt = t.read().unwrap();
+            let mut out = [0i64; 4];
+            for i in 0..4 {
+                let pos = idx[i] as usize;
+                out[i] = match bt.get(pos) {
+                    Some(Value::Int(val)) => *val,
+                    Some(Value::Float(f)) => *f as i64,
+                    _ => 0,
+                };
+            }
+            Value::V4Int(out)
+        }
         (Value::IntArray(t), Value::IntArray(idx)) => {
             let bt = t.read().unwrap();
             let bidx = idx.read().unwrap();
@@ -4066,6 +4176,9 @@ fn op_V_cmp_eq_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Int(a), Value::V4Int(b)) => {
+            Value::V4Int(crate::vm::simd::simd_v4cmp_eq_i(a, b))
+        }
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -4089,6 +4202,9 @@ fn op_V_cmp_gt_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Int(a), Value::V4Int(b)) => {
+            Value::V4Int(crate::vm::simd::simd_v4cmp_gt_i(a, b))
+        }
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -4112,6 +4228,9 @@ fn op_V_cmp_lt_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v1, v2, inst.operands[2].clone())
     };
     let res = match (v1, v2) {
+        (Value::V4Int(a), Value::V4Int(b)) => {
+            Value::V4Int(crate::vm::simd::simd_v4cmp_lt_i(a, b))
+        }
         (Value::IntArray(a), Value::IntArray(b)) => {
             let ba = a.read().unwrap();
             let bb = b.read().unwrap();
@@ -4135,6 +4254,10 @@ fn op_V_filter_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
         (v, m, inst.operands[2].clone())
     };
     let res = match (v_vals, v_mask) {
+        (Value::V4Int(vals), Value::V4Int(mask)) => {
+            let out = crate::vm::simd::simd_v4filter_i(vals, mask);
+            Value::IntArray(Arc::new(RwLock::new(out)))
+        }
         (Value::IntArray(vals), Value::IntArray(mask)) => {
             let bvals = vals.read().unwrap();
             let bmask = mask.read().unwrap();
@@ -4143,6 +4266,27 @@ fn op_V_filter_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
             ))))
         }
         _ => Value::Nil,
+    };
+    save_value_to_operand(ctx.process, &dst_op, res);
+    ctx.process.frame_stack.last_mut().unwrap().pc += 1;
+    become fetch_and_dispatch(ctx);
+}
+
+fn op_V_extract_I<'a>(ctx: &'a mut ExecutionContext<'a>) -> ExecutionResult {
+    let (v_vec, lane_idx, dst_op) = {
+        let frame = ctx.process.frame_stack.last().unwrap();
+        let inst = &ctx.bytecode.functions[frame.function_index].instructions[frame.pc];
+        let v = resolve_operand(ctx.bytecode, ctx.process, &inst.operands[0]);
+        let lane = match resolve_operand(ctx.bytecode, ctx.process, &inst.operands[1]) {
+            Value::Int(i) => i.max(0) as usize,
+            _ => 0,
+        };
+        (v, lane, inst.operands[2].clone())
+    };
+    let res = match v_vec {
+        Value::V4Int(a) => Value::Int(*a.get(lane_idx).unwrap_or(&0)),
+        Value::IntArray(a) => Value::Int(*a.read().unwrap().get(lane_idx).unwrap_or(&0)),
+        _ => Value::Int(0),
     };
     save_value_to_operand(ctx.process, &dst_op, res);
     ctx.process.frame_stack.last_mut().unwrap().pc += 1;
@@ -4679,7 +4823,8 @@ pub static DISPATCH_TABLE: [HandlerFn; OPCODE_COUNT] = [
     op_V_cmp_gt_I,    // 105: VCmpGtI
     op_V_cmp_lt_I,    // 106: VCmpLtI
     op_V_filter_I,    // 107: VFilterI
-    op_I_array_get,   // 108: IArrayGet
+    op_V_extract_I,   // 108: VExtractI
+    op_I_array_get,   // 109: IArrayGet
     op_I_array_set,   // 109: IArraySet
     op_F_array_get,   // 110: FArrayGet
     op_F_array_set,   // 111: FArraySet

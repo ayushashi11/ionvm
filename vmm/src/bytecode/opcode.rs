@@ -135,6 +135,7 @@ pub enum Opcode {
     VCmpGtI,
     VCmpLtI,
     VFilterI,
+    VExtractI,
 
     // Typed Array Opcodes
     IArrayGet,
@@ -320,6 +321,7 @@ impl Opcode {
             Opcode::VCmpGtI => "V_cmp_gt_I",
             Opcode::VCmpLtI => "V_cmp_lt_I",
             Opcode::VFilterI => "V_filter_I",
+            Opcode::VExtractI => "V_extract_I",
             Opcode::IArrayGet => "I_array_get",
             Opcode::IArraySet => "I_array_set",
             Opcode::FArrayGet => "F_array_get",
@@ -491,6 +493,7 @@ impl Opcode {
             "V_cmp_gt_I" => Some(Opcode::VCmpGtI),
             "V_cmp_lt_I" => Some(Opcode::VCmpLtI),
             "V_filter_I" => Some(Opcode::VFilterI),
+            "V_extract_I" => Some(Opcode::VExtractI),
             "I_array_get" => Some(Opcode::IArrayGet),
             "I_array_set" => Some(Opcode::IArraySet),
             "F_array_get" => Some(Opcode::FArrayGet),

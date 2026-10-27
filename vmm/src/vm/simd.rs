@@ -739,6 +739,20 @@ pub fn simd_str_eq(a: &str, b: &str) -> bool {
     ba[i..] == bb[i..]
 }
 
+pub fn simd_str_starts_with(haystack: &str, prefix: &str) -> bool {
+    if prefix.len() > haystack.len() {
+        return false;
+    }
+    simd_str_eq(&haystack[..prefix.len()], prefix)
+}
+
+pub fn simd_str_ends_with(haystack: &str, suffix: &str) -> bool {
+    if suffix.len() > haystack.len() {
+        return false;
+    }
+    simd_str_eq(&haystack[haystack.len() - suffix.len()..], suffix)
+}
+
 pub fn simd_str_find(haystack: &str, needle: &str) -> Option<usize> {
     let h = haystack.as_bytes();
     let n = needle.as_bytes();
@@ -934,5 +948,308 @@ pub fn simd_munchausen_range(start: i64, end: i64) -> Vec<i64> {
         }
     }
     matches
+}
+
+// ============================================================================
+// Fixed 4-Lane Stack SIMD Operations (Zero Heap Allocation)
+// ============================================================================
+
+#[inline(always)]
+pub fn simd_v4add_f(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_pd(a.as_ptr());
+                let vb = _mm256_loadu_pd(b.as_ptr());
+                let vr = _mm256_add_pd(va, vb);
+                let mut out = [0.0f64; 4];
+                _mm256_storeu_pd(out.as_mut_ptr(), vr);
+                return out;
+            }
+        }
+    }
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
+}
+
+#[inline(always)]
+pub fn simd_v4sub_f(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_pd(a.as_ptr());
+                let vb = _mm256_loadu_pd(b.as_ptr());
+                let vr = _mm256_sub_pd(va, vb);
+                let mut out = [0.0f64; 4];
+                _mm256_storeu_pd(out.as_mut_ptr(), vr);
+                return out;
+            }
+        }
+    }
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
+}
+
+#[inline(always)]
+pub fn simd_v4mul_f(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_pd(a.as_ptr());
+                let vb = _mm256_loadu_pd(b.as_ptr());
+                let vr = _mm256_mul_pd(va, vb);
+                let mut out = [0.0f64; 4];
+                _mm256_storeu_pd(out.as_mut_ptr(), vr);
+                return out;
+            }
+        }
+    }
+    [a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]]
+}
+
+#[inline(always)]
+pub fn simd_v4div_f(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_pd(a.as_ptr());
+                let vb = _mm256_loadu_pd(b.as_ptr());
+                let vr = _mm256_div_pd(va, vb);
+                let mut out = [0.0f64; 4];
+                _mm256_storeu_pd(out.as_mut_ptr(), vr);
+                return out;
+            }
+        }
+    }
+    [a[0] / b[0], a[1] / b[1], a[2] / b[2], a[3] / b[3]]
+}
+
+#[inline(always)]
+pub fn simd_v4dot_f(a: [f64; 4], b: [f64; 4]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_pd(a.as_ptr());
+                let vb = _mm256_loadu_pd(b.as_ptr());
+                let prod = _mm256_mul_pd(va, vb);
+                let mut out = [0.0f64; 4];
+                _mm256_storeu_pd(out.as_mut_ptr(), prod);
+                return out[0] + out[1] + out[2] + out[3];
+            }
+        }
+    }
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+}
+
+#[inline(always)]
+pub fn simd_v4sum_f(a: [f64; 4]) -> f64 {
+    a[0] + a[1] + a[2] + a[3]
+}
+
+#[inline(always)]
+pub fn simd_v4add_i(a: [i64; 4], b: [i64; 4]) -> [i64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+                let vb = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+                let vr = _mm256_add_epi64(va, vb);
+                let mut out = [0i64; 4];
+                _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, vr);
+                return out;
+            }
+        }
+    }
+    [
+        a[0].wrapping_add(b[0]),
+        a[1].wrapping_add(b[1]),
+        a[2].wrapping_add(b[2]),
+        a[3].wrapping_add(b[3]),
+    ]
+}
+
+#[inline(always)]
+pub fn simd_v4sub_i(a: [i64; 4], b: [i64; 4]) -> [i64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+                let vb = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+                let vr = _mm256_sub_epi64(va, vb);
+                let mut out = [0i64; 4];
+                _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, vr);
+                return out;
+            }
+        }
+    }
+    [
+        a[0].wrapping_sub(b[0]),
+        a[1].wrapping_sub(b[1]),
+        a[2].wrapping_sub(b[2]),
+        a[3].wrapping_sub(b[3]),
+    ]
+}
+
+#[inline(always)]
+pub fn simd_v4mul_i(a: [i64; 4], b: [i64; 4]) -> [i64; 4] {
+    [
+        a[0].wrapping_mul(b[0]),
+        a[1].wrapping_mul(b[1]),
+        a[2].wrapping_mul(b[2]),
+        a[3].wrapping_mul(b[3]),
+    ]
+}
+
+#[inline(always)]
+pub fn simd_v4div_i(a: [i64; 4], b: [i64; 4]) -> [i64; 4] {
+    [
+        if b[0] != 0 { a[0] / b[0] } else { 0 },
+        if b[1] != 0 { a[1] / b[1] } else { 0 },
+        if b[2] != 0 { a[2] / b[2] } else { 0 },
+        if b[3] != 0 { a[3] / b[3] } else { 0 },
+    ]
+}
+
+#[inline(always)]
+pub fn simd_v4rem_i(a: [i64; 4], b: [i64; 4]) -> [i64; 4] {
+    [
+        if b[0] != 0 { a[0] % b[0] } else { 0 },
+        if b[1] != 0 { a[1] % b[1] } else { 0 },
+        if b[2] != 0 { a[2] % b[2] } else { 0 },
+        if b[3] != 0 { a[3] % b[3] } else { 0 },
+    ]
+}
+
+#[inline(always)]
+pub fn simd_v4sum_i(a: [i64; 4]) -> i64 {
+    a[0].wrapping_add(a[1]).wrapping_add(a[2]).wrapping_add(a[3])
+}
+
+#[inline(always)]
+pub fn simd_v4add_ic(a: [i64; 4], c: i64) -> [i64; 4] {
+    simd_v4add_i(a, [c, c, c, c])
+}
+
+#[inline(always)]
+pub fn simd_v4sub_ic(a: [i64; 4], c: i64) -> [i64; 4] {
+    simd_v4sub_i(a, [c, c, c, c])
+}
+
+#[inline(always)]
+pub fn simd_v4mul_ic(a: [i64; 4], c: i64) -> [i64; 4] {
+    simd_v4mul_i(a, [c, c, c, c])
+}
+
+#[inline(always)]
+pub fn simd_v4div_ic(a: [i64; 4], c: i64) -> [i64; 4] {
+    if c == 0 {
+        return [0; 4];
+    }
+    [a[0] / c, a[1] / c, a[2] / c, a[3] / c]
+}
+
+#[inline(always)]
+pub fn simd_v4rem_ic(a: [i64; 4], c: i64) -> [i64; 4] {
+    if c == 0 {
+        return [0; 4];
+    }
+    [a[0] % c, a[1] % c, a[2] % c, a[3] % c]
+}
+
+#[inline(always)]
+pub fn simd_v4gather_i(table: &[i64], indices: [i64; 4]) -> [i64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            let t_len = table.len() as i64;
+            if indices[0] >= 0 && indices[0] < t_len
+                && indices[1] >= 0 && indices[1] < t_len
+                && indices[2] >= 0 && indices[2] < t_len
+                && indices[3] >= 0 && indices[3] < t_len
+            {
+                unsafe {
+                    let vidx = _mm256_loadu_si256(indices.as_ptr() as *const __m256i);
+                    let vr = _mm256_i64gather_epi64(table.as_ptr(), vidx, 8);
+                    let mut out = [0i64; 4];
+                    _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, vr);
+                    return out;
+                }
+            }
+        }
+    }
+    let t_len = table.len() as i64;
+    [
+        if indices[0] >= 0 && indices[0] < t_len { table[indices[0] as usize] } else { 0 },
+        if indices[1] >= 0 && indices[1] < t_len { table[indices[1] as usize] } else { 0 },
+        if indices[2] >= 0 && indices[2] < t_len { table[indices[2] as usize] } else { 0 },
+        if indices[3] >= 0 && indices[3] < t_len { table[indices[3] as usize] } else { 0 },
+    ]
+}
+
+#[inline(always)]
+pub fn simd_v4cmp_eq_i(a: [i64; 4], b: [i64; 4]) -> [i64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+                let vb = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+                let vr = _mm256_cmpeq_epi64(va, vb);
+                let mut out = [0i64; 4];
+                _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, vr);
+                return out;
+            }
+        }
+    }
+    [
+        if a[0] == b[0] { -1 } else { 0 },
+        if a[1] == b[1] { -1 } else { 0 },
+        if a[2] == b[2] { -1 } else { 0 },
+        if a[3] == b[3] { -1 } else { 0 },
+    ]
+}
+
+#[inline(always)]
+pub fn simd_v4cmp_gt_i(a: [i64; 4], b: [i64; 4]) -> [i64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                let va = _mm256_loadu_si256(a.as_ptr() as *const __m256i);
+                let vb = _mm256_loadu_si256(b.as_ptr() as *const __m256i);
+                let vr = _mm256_cmpgt_epi64(va, vb);
+                let mut out = [0i64; 4];
+                _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, vr);
+                return out;
+            }
+        }
+    }
+    [
+        if a[0] > b[0] { -1 } else { 0 },
+        if a[1] > b[1] { -1 } else { 0 },
+        if a[2] > b[2] { -1 } else { 0 },
+        if a[3] > b[3] { -1 } else { 0 },
+    ]
+}
+
+#[inline(always)]
+pub fn simd_v4cmp_lt_i(a: [i64; 4], b: [i64; 4]) -> [i64; 4] {
+    simd_v4cmp_gt_i(b, a)
+}
+
+#[inline(always)]
+pub fn simd_v4filter_i(values: [i64; 4], mask: [i64; 4]) -> Vec<i64> {
+    let mut out = Vec::with_capacity(4);
+    for i in 0..4 {
+        if mask[i] != 0 {
+            out.push(values[i]);
+        }
+    }
+    out
 }
 

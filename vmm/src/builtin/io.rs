@@ -270,6 +270,39 @@ fn write_serialized_value<W: Write>(
 
             writer.write_all(b"]")
         }
+
+        Value::V4Int(array) => {
+            writer.write_all(b"[")?;
+            for (i, item) in array.iter().enumerate() {
+                if i > 0 {
+                    writer.write_all(b", ")?;
+                }
+                write!(writer, "{item}")?;
+            }
+            writer.write_all(b"]")
+        }
+
+        Value::V4Float(array) => {
+            writer.write_all(b"[")?;
+            for (i, item) in array.iter().enumerate() {
+                if i > 0 {
+                    writer.write_all(b", ")?;
+                }
+                write_float(writer, *item)?;
+            }
+            writer.write_all(b"]")
+        }
+
+        Value::V4Bool(array) => {
+            writer.write_all(b"[")?;
+            for (i, item) in array.iter().enumerate() {
+                if i > 0 {
+                    writer.write_all(b", ")?;
+                }
+                writer.write_all(if *item { b"true" } else { b"false" })?;
+            }
+            writer.write_all(b"]")
+        }
     }
 }
 

@@ -98,6 +98,9 @@ pub enum ValType {
     Array,
     IntArray,
     FloatArray,
+    V4Int,
+    V4Float,
+    V4Bool,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -185,6 +188,9 @@ pub enum Value {
     Array(Arc<RwLock<Vec<Value>>>) = 7,
     IntArray(Arc<RwLock<Vec<i64>>>) = 8,
     FloatArray(Arc<RwLock<Vec<f64>>>) = 9,
+    V4Int([i64; 4]) = 10,
+    V4Float([f64; 4]) = 11,
+    V4Bool([bool; 4]) = 12,
 }
 
 
@@ -200,12 +206,15 @@ impl Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
+            (Value::String(a), Value::String(b)) => crate::vm::simd::simd_str_eq(a, b),
             (Value::Object(a), Value::Object(b)) => Arc::ptr_eq(a, b),
             (Value::Function(a), Value::Function(b)) => Arc::ptr_eq(a, b),
             (Value::Array(a), Value::Array(b)) => Arc::ptr_eq(a, b) || *a.read().unwrap() == *b.read().unwrap(),
             (Value::IntArray(a), Value::IntArray(b)) => Arc::ptr_eq(a, b) || *a.read().unwrap() == *b.read().unwrap(),
             (Value::FloatArray(a), Value::FloatArray(b)) => Arc::ptr_eq(a, b) || *a.read().unwrap() == *b.read().unwrap(),
+            (Value::V4Int(a), Value::V4Int(b)) => a == b,
+            (Value::V4Float(a), Value::V4Float(b)) => a == b,
+            (Value::V4Bool(a), Value::V4Bool(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }
@@ -223,6 +232,9 @@ impl Value {
             Value::Array(a) => format!("[Array len={}]", a.read().unwrap().len()),
             Value::IntArray(a) => format!("[IntArray len={}]", a.read().unwrap().len()),
             Value::FloatArray(a) => format!("[FloatArray len={}]", a.read().unwrap().len()),
+            Value::V4Int(v) => format!("[V4Int {:?}]", v),
+            Value::V4Float(v) => format!("[V4Float {:?}]", v),
+            Value::V4Bool(v) => format!("[V4Bool {:?}]", v),
         }
     }
 }
