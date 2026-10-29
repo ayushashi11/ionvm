@@ -1253,3 +1253,102 @@ pub fn simd_v4filter_i(values: [i64; 4], mask: [i64; 4]) -> Vec<i64> {
     out
 }
 
+#[inline(always)]
+pub fn simd_v4select_i(
+    mask: [i64; 4],
+    on_true: [i64; 4],
+    on_false: [i64; 4],
+) -> [i64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                // AVX blend instructions inspect the sign bit of each lane.
+                // Normalize the VM's 0/1 or other nonzero masks to 0/-1.
+                let vm = _mm256_set_epi64x(
+                    if mask[3] != 0 { -1 } else { 0 },
+                    if mask[2] != 0 { -1 } else { 0 },
+                    if mask[1] != 0 { -1 } else { 0 },
+                    if mask[0] != 0 { -1 } else { 0 },
+                );
+
+                let vt = _mm256_loadu_si256(
+                    on_true.as_ptr() as *const __m256i,
+                );
+                let vf = _mm256_loadu_si256(
+                    on_false.as_ptr() as *const __m256i,
+                );
+
+                // Select true values wherever the corresponding mask lane
+                // is nonzero. All eight bytes of each i64 lane are selected.
+                let result = _mm256_blendv_epi8(vf, vt, vm);
+
+                let mut out = [0_i64; 4];
+                _mm256_storeu_si256(
+                    out.as_mut_ptr() as *mut __m256i,
+                    result,
+                );
+
+                return out;
+            }
+        }
+    }
+
+    let mut out = [0_i64; 4];
+    for i in 0..4 {
+        out[i] = if mask[i] != 0 {
+            on_true[i]
+        } else {
+            on_false[i]
+        };
+    }
+    out
+}
+
+#[inline(always)]
+pub fn simd_v4select_f(
+    mask: [i64; 4],
+    on_true: [f64; 4],
+    on_false: [f64; 4],
+) -> [f64; 4] {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe {
+                // The mask needs a set sign bit for every selected lane.
+                let vm = _mm256_set_epi64x(
+                    if mask[3] != 0 { -1 } else { 0 },
+                    if mask[2] != 0 { -1 } else { 0 },
+                    if mask[1] != 0 { -1 } else { 0 },
+                    if mask[0] != 0 { -1 } else { 0 },
+                );
+
+                let vt = _mm256_loadu_pd(on_true.as_ptr());
+                let vf = _mm256_loadu_pd(on_false.as_ptr());
+
+                // Reinterpret the mask bits; we do not convert the mask
+                // numerically to floating point.
+                let result = _mm256_blendv_pd(
+                    vf,
+                    vt,
+                    _mm256_castsi256_pd(vm),
+                );
+
+                let mut out = [0.0_f64; 4];
+                _mm256_storeu_pd(out.as_mut_ptr(), result);
+
+                return out;
+            }
+        }
+    }
+
+    let mut out = [0.0_f64; 4];
+    for i in 0..4 {
+        out[i] = if mask[i] != 0 {
+            on_true[i]
+        } else {
+            on_false[i]
+        };
+    }
+    out
+}

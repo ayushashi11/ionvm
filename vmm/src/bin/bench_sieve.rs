@@ -203,7 +203,7 @@ fn main() {
     println!("     IonVM High Performance Sieve of Eratosthenes Benchmark");
     println!("============================================================");
 
-    let limits = [10_000_000, 50_000_000];
+    let limits = [10_000_000, 50_000_000, 100_000_000];
     let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
 
     println!("Detected CPU Hardware Concurrency: {} threads\n", num_cpus);
