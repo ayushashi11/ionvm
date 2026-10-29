@@ -451,6 +451,7 @@ fn test_loop_to_simd_vectorization() {
     assert_eq!(func.instructions.len(), 10);
 
     optimize_function(&mut func);
+    println!("Optimized function instructions: {:?}", func.instructions);
     assert!(func.instructions.len() > 10, "Loop must be vectorized to SIMD width");
 
     let bc = Bytecode {
